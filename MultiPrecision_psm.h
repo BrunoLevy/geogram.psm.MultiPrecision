@@ -3,7 +3,7 @@
 #define GEO_DYNAMIC_LIBS
 #endif
 /*
- *  Copyright (c) 2012-2014, Bruno Levy
+ *  Copyright (c) 2000-2022 Inria
  *  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -30,19 +30,13 @@
  *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  *
- *  If you modify this software, you should include a notice giving the
- *  name of the person performing the modification, the date of modification,
- *  and the reason for such modification.
- *
  *  Contact: Bruno Levy
  *
- *     Bruno.Levy@inria.fr
- *     http://www.loria.fr/~levy
+ *     https://www.inria.fr/fr/bruno-levy
  *
- *     ALICE Project
- *     LORIA, INRIA Lorraine, 
- *     Campus Scientifique, BP 239
- *     54506 VANDOEUVRE LES NANCY CEDEX 
+ *     Inria,
+ *     Domaine de Voluceau,
+ *     78150 Le Chesnay - Rocquencourt
  *     FRANCE
  *
  */
@@ -1209,6 +1203,11 @@ inline void geo_pause() {
 # define GEO_USE_DEFAULT_SPINLOCK_ARRAY
 # include <AvailabilityMacros.h>
 # if defined(MAC_OS_X_VERSION_10_12) && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
+#   define GEO_APPLE_HAS_UNFAIR_LOCK 1
+#   include <os/lock.h>
+# endif
+# if defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED >= __IPHONE_10_0
+#   define GEO_APPLE_HAS_UNFAIR_LOCK 1
 #   include <os/lock.h>
 # endif
 #endif
@@ -1282,7 +1281,7 @@ namespace GEO {
 
 #elif defined(GEO_OS_APPLE)
 
-#if defined(MAC_OS_X_VERSION_10_12) && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
+#if defined(GEO_APPLE_HAS_UNFAIR_LOCK)
         
         typedef os_unfair_lock spinlock;
         
