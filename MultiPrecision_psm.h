@@ -356,14 +356,7 @@ namespace GEO {
 #include <float.h>
 #include <limits.h>
 #include <algorithm> // for std::min / std::max
-
-// Visual C++ ver. < 2010 does not have C99 stdint.h,
-// using a fallback portable one.
-#if defined(GEO_OS_WINDOWS) && (_MSC_VER < 1600)
-#else
 #include <stdint.h>
-#endif
-
 #include <limits>
 
 #ifndef M_PI
@@ -573,7 +566,9 @@ namespace GEO {
             ::memcpy(to, from, size);
         }
 
-	inline pointer function_pointer_to_generic_pointer(function_pointer fptr) {
+	inline pointer function_pointer_to_generic_pointer(
+            function_pointer fptr
+        ) {
 	    // I know this is ugly, but I did not find a simpler warning-free
 	    // way that is portable between all compilers.
 	    pointer result = nullptr;
@@ -581,7 +576,9 @@ namespace GEO {
 	    return result;
 	}
 
-	inline function_pointer generic_pointer_to_function_pointer(pointer ptr) {
+	inline function_pointer generic_pointer_to_function_pointer(
+            pointer ptr
+        ) {
 	    // I know this is ugly, but I did not find a simpler warning-free
 	    // way that is portable between all compilers.
 	    function_pointer result = nullptr;
@@ -1803,7 +1800,9 @@ namespace GEO {
 #define GEOGRAM_NUMERICS_MULTI_PRECISION
 
 #include <iostream>
+#include <sstream>
 #include <new>
+#include <math.h>
 
 
 namespace GEO {
@@ -2214,13 +2213,40 @@ namespace GEO {
             return geo_sgn(x_[length() - 1]);
         }
 
-        std::ostream& show(std::ostream& os) const {
-            for(index_t i = 0; i < length(); ++i) {
-                os << i << ':' << x_[i] << ' ';
-            }
-            return os << std::endl;
+        bool is_same_as(const expansion& rhs) const;
+
+        bool is_same_as(double rhs) const;
+
+
+        Sign compare(const expansion& rhs) const;
+
+        Sign compare(double rhs) const;
+
+        bool equals(const expansion& rhs) const {
+            return (compare(rhs) == ZERO);
         }
 
+        bool equals(double rhs) const {
+            return (compare(rhs) == ZERO);            
+        }
+        
+        std::ostream& show(std::ostream& out) const {
+            out << "expansion[" << length() << "] = [";
+            for(index_t i=0; i<length(); ++i) {
+                out << (*this)[i] << " ";
+            }
+            out << "]";
+            return out;
+        }
+
+        std::string to_string() const {
+            std::ostringstream out;
+            show(out);
+            return out.str();
+        }
+
+        void optimize();
+        
     protected:
         static index_t sub_product_capacity(
             index_t a_length, index_t b_length
@@ -2352,6 +2378,25 @@ namespace GEO {
     );
     
     
+
+    void GEOGRAM_API grow_expansion_zeroelim(
+        const expansion& e, double b, expansion& h
+    );
+
+    void GEOGRAM_API scale_expansion_zeroelim(
+        const expansion& e, double b, expansion& h
+    );    
+
+    void GEOGRAM_API fast_expansion_sum_zeroelim(
+        const expansion& e, const expansion& f, expansion& h
+    );
+
+
+    void GEOGRAM_API fast_expansion_diff_zeroelim(
+        const expansion& e, const expansion& f, expansion& h
+    );
+    
+    
 }
 
 #endif
@@ -2366,16 +2411,143 @@ namespace GEO {
 
 namespace GEO {
 
+    class expansion_nt;
+    class rational_nt;
+    
     class GEOGRAM_API expansion_nt {
     public:
+         enum UninitializedType {
+             UNINITIALIZED
+         };
+
+         enum Operation {
+             SUM, DIFF, PRODUCT
+         };
+         
+         explicit expansion_nt(
+             UninitializedType uninitialized
+         ) : rep_(nullptr) {
+             geo_argused(uninitialized);
+         }
+         
         explicit expansion_nt(double x = 0.0) {
             rep_ = expansion::new_expansion_on_heap(1);
             rep()[0] = x;
             rep().set_length(1);
         }
 
+        explicit expansion_nt(const expansion& rhs) {
+            rep_ = expansion::new_expansion_on_heap(rhs.length());
+            rep().set_length(rhs.length());
+            for(index_t i=0; i<rhs.length(); ++i) {
+                rep()[i] = rhs[i];
+            }
+        }
+
+        explicit expansion_nt(
+            Operation op, const expansion& x, const expansion& y
+        ) {
+            switch(op) {
+            case SUM:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::sum_capacity(x,y)
+                );
+                rep_->assign_sum(x,y);
+                break;
+            case DIFF:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::diff_capacity(x,y)
+                );
+                rep_->assign_diff(x,y);
+                break;
+            case PRODUCT:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::product_capacity(x,y)
+                );
+                rep_->assign_product(x,y);
+                break;
+            }
+        }
+
+        explicit expansion_nt(
+            Operation op,
+            const expansion& x, const expansion& y, const expansion& z
+        ) {
+            switch(op) {
+            case SUM:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::sum_capacity(x,y,z)
+                );
+                rep_->assign_sum(x,y,z);
+                break;
+            case DIFF:
+                geo_assert_not_reached;
+                break;
+            case PRODUCT:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::product_capacity(x,y,z)
+                );
+                rep_->assign_product(x,y,z);
+                break;
+            }
+        }
+
+        explicit expansion_nt(
+            Operation op,
+            const expansion& x, const expansion& y,
+            const expansion& z, const expansion& t
+        ) {
+            switch(op) {
+            case SUM:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::sum_capacity(x,y,z,t)
+                );
+                rep_->assign_sum(x,y,z,t);
+                break;
+            case DIFF:
+                geo_assert_not_reached;
+                break;
+            case PRODUCT:
+                const expansion& p1 = expansion_product(x,y);
+                const expansion& p2 = expansion_product(z,t);
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::product_capacity(p1,p2)
+                );
+                rep_->assign_sum(p1,p2);
+                break;
+            }
+        }
+        
+        explicit expansion_nt(Operation op, double x, double y) {
+            switch(op) {
+            case SUM:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::sum_capacity(x,y)
+                );
+                rep_->assign_sum(x,y);
+                break;
+            case DIFF:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::diff_capacity(x,y)
+                );
+                rep_->assign_diff(x,y);
+                break;
+            case PRODUCT:
+                rep_ = expansion::new_expansion_on_heap(
+                    expansion::product_capacity(x,y)
+                );
+                rep_->assign_product(x,y);
+                break;
+            }
+        }
+        
         expansion_nt(const expansion_nt& rhs) {
             copy(rhs);
+        }
+
+        expansion_nt(expansion_nt&& rhs) {
+            rep_ = nullptr;
+            std::swap(rep_, rhs.rep_);
         }
         
         expansion_nt& operator= (const expansion_nt& rhs) {
@@ -2386,10 +2558,22 @@ namespace GEO {
             return *this;
         }
 
+        expansion_nt& operator= (expansion_nt&& rhs) {
+            if(&rhs != this) {
+                cleanup();
+                std::swap(rep_, rhs.rep_);
+            }
+            return *this;
+        }
+        
         ~expansion_nt() {
             cleanup();
         }
 
+        void optimize() {
+            rep().optimize();
+        }
+        
         
 
         expansion_nt& operator+= (const expansion_nt& rhs);
@@ -2424,21 +2608,45 @@ namespace GEO {
 
         
 
-        bool operator> (const expansion_nt& rhs) const;
+        Sign compare(const expansion_nt& rhs) const {
+            return rep().compare(rhs.rep());
+        }
 
-        bool operator>= (const expansion_nt& rhs) const;
+        Sign compare(double rhs) const {
+            return rep().compare(rhs);
+        }
+        
+        bool operator> (const expansion_nt& rhs) const {
+            return (int(compare(rhs))>0);
+        }
 
-        bool operator< (const expansion_nt& rhs) const;
+        bool operator>= (const expansion_nt& rhs) const {
+            return (int(compare(rhs))>=0);
+        }
 
-        bool operator<= (const expansion_nt& rhs) const;
+        bool operator< (const expansion_nt& rhs) const {
+            return (int(compare(rhs))<0);
+        }
 
-        bool operator> (double rhs) const;
+        bool operator<= (const expansion_nt& rhs) const {
+            return (int(compare(rhs))<=0);
+        }
 
-        bool operator>= (double rhs) const;
+        bool operator> (double rhs) const {
+            return (int(compare(rhs))>0);            
+        }
 
-        bool operator< (double rhs) const;
+        bool operator>= (double rhs) const {
+            return (int(compare(rhs))>=0);            
+        }
+        
+        bool operator< (double rhs) const {
+            return (int(compare(rhs))<0);                        
+        }
 
-        bool operator<= (double rhs) const;
+        bool operator<= (double rhs) const {
+            return (int(compare(rhs))<=0);            
+        }
 
         
 
@@ -2471,20 +2679,31 @@ namespace GEO {
             return *rep_;
         }
 
-
+        std::string to_string() const {
+            return (rep_ == nullptr) ?
+                std::string("null") :
+                rep_->to_string()   ;
+        }
+        
     protected:
 
         void copy(const expansion_nt& rhs) {
-            rep_ = expansion::new_expansion_on_heap(rhs.rep().capacity());
-            rep_->set_length(rhs.rep().length());
-            for(index_t i=0; i<rep_->length(); ++i) {
-                (*rep_)[i] = rhs.rep()[i];
+            if(rhs.rep_ == nullptr) {
+                rep_ = nullptr;
+            } else {
+                rep_ = expansion::new_expansion_on_heap(rhs.rep().capacity());
+                rep_->set_length(rhs.rep().length());
+                for(index_t i=0; i<rep_->length(); ++i) {
+                    (*rep_)[i] = rhs.rep()[i];
+                }
             }
         }
 
         void cleanup() {
-            expansion::delete_expansion_on_heap(rep_);
-            rep_ = nullptr;
+            if(rep_ != nullptr) {
+                expansion::delete_expansion_on_heap(rep_);
+                rep_ = nullptr;
+            }
         }
         
     private:
@@ -2499,6 +2718,7 @@ namespace GEO {
             const double* a, const double* b, const double* c,
             coord_index_t dim
         );
+        friend class rational_nt;
     };
 
     inline expansion_nt operator+ (double a, const expansion_nt& b) {
@@ -2516,27 +2736,27 @@ namespace GEO {
     }
 
     inline bool operator== (const expansion_nt& a, const expansion_nt& b) {
-        return (a - b).sign() == ZERO;
+        return a.rep().equals(b.rep());
     }
 
     inline bool operator== (const expansion_nt& a, double b) {
-        return (a - b).sign() == ZERO;
+        return a.rep().equals(b);
     }
 
     inline bool operator== (double a, const expansion_nt& b) {
-        return (a - b).sign() == ZERO;
+        return b.rep().equals(a);
     }
 
     inline bool operator!= (const expansion_nt& a, const expansion_nt& b) {
-        return (a - b).sign() != ZERO;
+        return !a.rep().equals(b.rep());
     }
 
     inline bool operator!= (const expansion_nt& a, double b) {
-        return (a - b).sign() != ZERO;
+        return !a.rep().equals(b);
     }
 
     inline bool operator!= (double a, const expansion_nt& b) {
-        return (a - b).sign() != ZERO;
+        return !b.rep().equals(a);
     }
 
     inline expansion_nt expansion_nt_sq_dist(
@@ -2572,8 +2792,7 @@ namespace GEO {
     }
 
     inline bool expansion_nt_is_one(const expansion_nt& x) {
-        const GEO::expansion& diff = expansion_diff(x.rep(), 1.0);
-        return (diff.sign() == GEO::ZERO);
+        return x.rep().equals(1.0);
     }
 
 
@@ -2616,8 +2835,55 @@ namespace GEO {
         const expansion_nt& a30,const expansion_nt& a31,
         const expansion_nt& a32,const expansion_nt& a33 
     );
+
+
+#ifndef GEOGRAM_PSM   
+    template <> inline expansion_nt det2x2(
+        const expansion_nt& a11, const expansion_nt& a12,                    
+        const expansion_nt& a21, const expansion_nt& a22
+    ) {
+        return expansion_nt_determinant(
+            a11,a12,
+            a21,a22
+        );
+    }
+
     
+    template <> inline expansion_nt det3x3(
+        const expansion_nt& a11, const expansion_nt& a12,
+        const expansion_nt& a13,                
+        const expansion_nt& a21, const expansion_nt& a22,
+        const expansion_nt& a23,                
+        const expansion_nt& a31, const expansion_nt& a32,
+        const expansion_nt& a33
+    ) {
+        return expansion_nt_determinant(
+            a11,a12,a13,
+            a21,a22,a23,
+            a31,a32,a33
+        );
+    }
+
     
+    template <> inline expansion_nt det4x4(
+        const expansion_nt& a11, const expansion_nt& a12,
+        const expansion_nt& a13, const expansion_nt& a14,
+        const expansion_nt& a21, const expansion_nt& a22,
+        const expansion_nt& a23, const expansion_nt& a24,               
+        const expansion_nt& a31, const expansion_nt& a32,
+        const expansion_nt& a33, const expansion_nt& a34,  
+        const expansion_nt& a41, const expansion_nt& a42,
+        const expansion_nt& a43, const expansion_nt& a44  
+    ) {
+        return expansion_nt_determinant(
+            a11,a12,a13,a14,
+            a21,a22,a23,a24,
+            a31,a32,a33,a34,
+            a41,a42,a43,a44            
+        );
+    }
+    
+#endif
 }
 
 inline std::ostream& operator<< (
@@ -2642,30 +2908,60 @@ namespace GEO {
     class GEOGRAM_API rational_nt {
       public:
 
+         enum UninitializedType {
+             UNINITIALIZED
+         };
+
+         explicit rational_nt(UninitializedType uninitialized) :
+            num_(expansion_nt::UNINITIALIZED),
+            denom_(expansion_nt::UNINITIALIZED) {
+             geo_argused(uninitialized);
+         }
+
+         
         explicit rational_nt(double x = 0.0) : num_(x), denom_(1.0) {
         }
 
         explicit rational_nt(const expansion_nt& x) : num_(x), denom_(1.0) {
         }
 
+        explicit rational_nt(expansion_nt&& x) : num_(x), denom_(1.0) {
+        }
+        
+        explicit rational_nt(double num, double denom)
+	    : num_(num), denom_(denom) {
+        }
+        
         explicit rational_nt(const expansion_nt& num, const expansion_nt& denom)
 	    : num_(num), denom_(denom) {
         }
-	
+
+        explicit rational_nt(
+            expansion_nt&& num, expansion_nt&& denom
+        ) : num_(num), denom_(denom) {
+        }
+            
         rational_nt(const rational_nt& rhs) {
             copy(rhs);
         }
+
+        rational_nt(rational_nt&& rhs) :
+           num_(rhs.num_),
+           denom_(rhs.denom_) {
+        }
         
         rational_nt& operator= (const rational_nt& rhs) {
-            if(&rhs != this) {
-                copy(rhs);
-            }
+            num_ = rhs.num_;
+            denom_ = rhs.denom_;
             return *this;
         }
 
-        ~rational_nt() {
+        rational_nt& operator= (rational_nt&& rhs) {
+            num_ = rhs.num_;
+            denom_ = rhs.denom_;
+            return *this;
         }
-
+        
 	const expansion_nt& num() const {
 	    return num_;
 	}
@@ -2681,11 +2977,16 @@ namespace GEO {
 	 expansion_nt& denom() {
 	    return denom_;
 	}
-	
+
+        void optimize() {
+            num().optimize();
+            denom().optimize();
+        }
+         
         
 
         rational_nt& operator+= (const rational_nt& rhs) {
-	    if(trivially_has_same_denom(rhs)) {
+	    if(has_same_denom(rhs)) {
 		num_ += rhs.num_;
 	    } else {
 		num_ = num_ * rhs.denom_ + rhs.num_ * denom_;	    
@@ -2695,7 +2996,7 @@ namespace GEO {
 	}
 
         rational_nt& operator-= (const rational_nt& rhs) {
-	    if(trivially_has_same_denom(rhs)) {
+	    if(has_same_denom(rhs)) {
 		num_ -= rhs.num_;
 	    } else {
 		num_ = num_ * rhs.denom_ - rhs.num_ * denom_;	    
@@ -2739,7 +3040,7 @@ namespace GEO {
         
 
         rational_nt operator+ (const rational_nt& rhs) const {
-	    if(trivially_has_same_denom(rhs)) {
+	    if(has_same_denom(rhs)) {
 		return rational_nt(
 		    num_ + rhs.num_,
 		    denom_
@@ -2752,7 +3053,7 @@ namespace GEO {
 	}
 
         rational_nt operator- (const rational_nt& rhs) const {
-	    if(trivially_has_same_denom(rhs)) {
+	    if(has_same_denom(rhs)) {
 		return rational_nt(
 		    num_ - rhs.num_,
 		    denom_
@@ -2818,21 +3119,41 @@ namespace GEO {
 
         
 
-        bool operator> (const rational_nt& rhs) const;
+        Sign compare(const rational_nt& rhs) const;
 
-        bool operator>= (const rational_nt& rhs) const;
+        Sign compare(double rhs) const;
+        
+        bool operator> (const rational_nt& rhs) const {
+            return (int(compare(rhs))>0);
+        }
 
-        bool operator< (const rational_nt& rhs) const;
+        bool operator>= (const rational_nt& rhs) const {
+            return (int(compare(rhs))>=0);            
+        }
 
-        bool operator<= (const rational_nt& rhs) const;
+        bool operator< (const rational_nt& rhs) const {
+            return (int(compare(rhs))<0);
+        }
 
-        bool operator> (double rhs) const;
+        bool operator<= (const rational_nt& rhs) const {
+            return (int(compare(rhs))<=0);
+        }
 
-        bool operator>= (double rhs) const;
+        bool operator> (double rhs) const {
+            return (int(compare(rhs))>0);            
+        }
 
-        bool operator< (double rhs) const;
+        bool operator>= (double rhs) const {
+            return (int(compare(rhs))>=0);            
+        }
 
-        bool operator<= (double rhs) const;
+        bool operator< (double rhs) const {
+            return (int(compare(rhs))<0);            
+        }
+
+        bool operator<= (double rhs) const {
+            return (int(compare(rhs))<=0);                        
+        }
 
         
 
@@ -2841,6 +3162,7 @@ namespace GEO {
         }
         
         Sign sign() const {
+            geo_debug_assert(denom_.sign() != ZERO);
             return Sign(num_.sign() * denom_.sign());
         }
 
@@ -2850,12 +3172,8 @@ namespace GEO {
 	    denom_ = rhs.denom_;
 	}
 
-	bool trivially_has_same_denom(const rational_nt& rhs) const {
-	    return(
-		denom_.rep().length() == 1 &&
-		rhs.denom_.rep().length() == 1 &&
-		denom_.component(0) == rhs.denom_.component(0)
-	    );
+	bool has_same_denom(const rational_nt& rhs) const {
+            return denom_ == rhs.denom_;
 	}
 	
       private:
@@ -2887,27 +3205,33 @@ namespace GEO {
     }
     
     inline bool operator== (const rational_nt& a, const rational_nt& b) {
-        return (a - b).sign() == ZERO;
+        return (a.compare(b) == ZERO);
     }
 
     inline bool operator== (const rational_nt& a, double b) {
-        return (a - b).sign() == ZERO;
+        return (a.compare(b) == ZERO);
     }
 
     inline bool operator== (double a, const rational_nt& b) {
-        return (a - b).sign() == ZERO;
+        return (b.compare(a) == ZERO);
     }
 
     inline bool operator!= (const rational_nt& a, const rational_nt& b) {
-        return (a - b).sign() != ZERO;
+        return (a.compare(b) != ZERO);
     }
 
     inline bool operator!= (const rational_nt& a, double b) {
-        return (a - b).sign() != ZERO;
+        return (a.compare(b) != ZERO);
     }
 
     inline bool operator!= (double a, const rational_nt& b) {
-        return (a - b).sign() != ZERO;
+        return (b.compare(a) != ZERO);
+    }
+
+    
+    
+    template <> inline Sign geo_sgn(const rational_nt& x) {
+        return x.sign();
     }
 
     

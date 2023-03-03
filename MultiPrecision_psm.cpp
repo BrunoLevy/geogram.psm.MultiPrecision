@@ -88,8 +88,9 @@ namespace {
     
 
     class Pools {
-    public:
 
+    public:
+        
         Pools() : pools_(1024,nullptr) {
             chunks_.reserve(1024);
         }
@@ -103,12 +104,12 @@ namespace {
         void* malloc(size_t size) {
             if(size >= pools_.size()) {
                 return ::malloc(size);
-            }
+            } 
             if(pools_[size] == nullptr) {
                 new_chunk(size);
             }
-            void* result = pools_[size];
-            pools_[size] = *static_cast<void**>(pools_[size]);
+            Memory::pointer result = pools_[size];
+            pools_[size] = next(pools_[size]);
             return result;
         }
 
@@ -117,31 +118,54 @@ namespace {
                 ::free(ptr);
                 return;
             }
-            *static_cast<void**>(ptr) = pools_[size];
-            pools_[size] = ptr;
+            set_next(Memory::pointer(ptr), pools_[size]);
+            pools_[size] = Memory::pointer(ptr);
         }
 
         
     protected:
-        static const index_t POOL_CHUNK_SIZE = 512;
+        static const index_t NB_ITEMS_PER_CHUNK = 512;
         
-        void new_chunk(size_t size_in) {
-            size_t size = (size_in / 8 + 1)*8; // Align memory.
-            Memory::pointer chunk = new Memory::byte[size * POOL_CHUNK_SIZE];
-            for(index_t i=0; i<POOL_CHUNK_SIZE-1; ++i) {
-                Memory::pointer cur = chunk + size * i;
-                Memory::pointer next = cur + size;
-                *reinterpret_cast<void**>(cur) = next;
+        void new_chunk(size_t item_size) {
+            // Allocate chunk
+            Memory::pointer chunk =
+                new Memory::byte[item_size * NB_ITEMS_PER_CHUNK];
+            // Chain items in chunk
+            for(index_t i=0; i<NB_ITEMS_PER_CHUNK-1; ++i) {
+                Memory::pointer cur_item  = item(chunk, item_size, i);
+                Memory::pointer next_item = item(chunk, item_size, i+1);
+                set_next(cur_item, next_item);
             }
-            *reinterpret_cast<void**>(chunk + (size-1)*POOL_CHUNK_SIZE) =
-		pools_[size_in];
-            pools_[size_in] = chunk;
+            // Last item's next is pool's first
+            set_next(
+                item(chunk, item_size,NB_ITEMS_PER_CHUNK-1),
+                pools_[item_size]
+            );
+            // Set pool's first to first in chunk
+            pools_[item_size] = chunk;
             chunks_.push_back(chunk);
         }
 
-        
     private:
-        std::vector<void*> pools_;
+
+        Memory::pointer next(Memory::pointer item) const {
+            return *reinterpret_cast<Memory::pointer*>(item);
+        }
+
+        void set_next(
+            Memory::pointer item, Memory::pointer next
+        ) const {
+            *reinterpret_cast<Memory::pointer*>(item) = next;
+        }
+
+        Memory::pointer item(
+            Memory::pointer chunk, size_t item_size, index_t index
+        ) const {
+            geo_debug_assert(index < NB_ITEMS_PER_CHUNK);
+            return chunk + (item_size * size_t(index));
+        }
+        
+        std::vector<Memory::pointer> pools_;
         
         std::vector<Memory::pointer> chunks_;
 
@@ -295,6 +319,9 @@ namespace {
         two_sum(_m, _k, x[7], x[6]);
 #endif
     }
+}
+
+namespace GEO {
 
     void grow_expansion_zeroelim(
         const expansion& e, double b, expansion& h
@@ -832,6 +859,46 @@ namespace GEO {
     
     
 
+    bool expansion::is_same_as(const expansion& rhs) const {
+        if(length() != rhs.length()) {
+            return false;
+        }
+        for(index_t i=0; i<length(); ++i) {
+            if(x_[i] != rhs.x_[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool expansion::is_same_as(double rhs) const {
+        if(length() != 1) {
+            return false;
+        }
+        return (x_[0] == rhs);
+    }
+
+    Sign expansion::compare(const expansion& rhs) const {
+        if(is_same_as(rhs)) {
+            return ZERO;
+        }
+        const expansion& d = expansion_diff(*this, rhs);
+        return d.sign();
+    }
+    
+    Sign expansion::compare(double rhs) const {
+        if(rhs == 0.0) {
+            return sign();
+        }
+        if(is_same_as(rhs)) {
+            return ZERO;
+        }
+        const expansion& d = expansion_diff(*this, rhs);
+        return d.sign();
+    }
+    
+    
+    
     Sign sign_of_expansion_determinant(
         const expansion& a00,const expansion& a01,  
         const expansion& a10,const expansion& a11
@@ -922,6 +989,12 @@ namespace GEO {
         return result.sign();
     }
     
+    
+
+    void expansion::optimize() {
+        grow_expansion_zeroelim(*this, 0.0, *this);
+    }
+
     
     
 }
@@ -1058,60 +1131,6 @@ namespace GEO {
 
     
 
-    bool expansion_nt::operator> (const expansion_nt& rhs) const {
-        const expansion& diff = expansion_diff(rep(), rhs.rep());
-        return diff.sign() > 0;
-    }
-
-    bool expansion_nt::operator>= (const expansion_nt& rhs) const {
-        const expansion& diff = expansion_diff(rep(), rhs.rep());
-        return diff.sign() >= 0;
-    }
-
-    bool expansion_nt::operator< (const expansion_nt& rhs) const {
-        const expansion& diff = expansion_diff(rep(), rhs.rep());
-        return diff.sign() < 0;
-    }
-
-    bool expansion_nt::operator<= (const expansion_nt& rhs) const {
-        const expansion& diff = expansion_diff(rep(), rhs.rep());
-        return diff.sign() <= 0;
-    }
-
-    bool expansion_nt::operator> (double rhs) const {
-        if(rhs == 0.0) {
-            return rep().sign() > 0;
-        }
-        const expansion& diff = expansion_diff(rep(), rhs);
-        return diff.sign() > 0;
-    }
-
-    bool expansion_nt::operator>= (double rhs) const {
-        if(rhs == 0.0) {
-            return rep().sign() >= 0;
-        }
-        const expansion& diff = expansion_diff(rep(), rhs);
-        return diff.sign() >= 0;
-    }
-
-    bool expansion_nt::operator< (double rhs) const {
-        if(rhs == 0.0) {
-            return rep().sign() < 0;
-        }
-        const expansion& diff = expansion_diff(rep(), rhs);
-        return diff.sign() < 0;
-    }
-
-    bool expansion_nt::operator<= (double rhs) const {
-        if(rhs == 0.0) {
-            return rep().sign() <= 0;
-        }
-        const expansion& diff = expansion_diff(rep(), rhs);
-        return diff.sign() <= 0;
-    }
-
-    
-
     expansion_nt expansion_nt_determinant(
         const expansion_nt& a00,const expansion_nt& a01,  
         const expansion_nt& a10,const expansion_nt& a11
@@ -1142,11 +1161,7 @@ namespace GEO {
         const expansion& z2 = expansion_product(m02,a12.rep()).negate();
         const expansion& z3 = expansion_product(m12,a02.rep());
 
-        expansion* m012 = expansion::new_expansion_on_heap(
-            expansion::sum_capacity(z1,z2,z3)
-        );
-        m012->assign_sum(z1,z2,z3);
-        return expansion_nt(m012);
+        return expansion_nt(expansion_nt::SUM, z1, z2, z3);
     }
     
     expansion_nt expansion_nt_determinant(
@@ -1204,124 +1219,38 @@ namespace GEO {
 
         const expansion& z1 = expansion_sum(m0123_1, m0123_3);
         const expansion& z2 = expansion_sum(m0123_2, m0123_4);
-        
-        expansion_nt result(
-            expansion::new_expansion_on_heap(expansion::diff_capacity(z1,z2))
-        );
-        result.rep().assign_diff(z1,z2);
-        return result;
+
+        return expansion_nt(expansion_nt::DIFF,z1,z2);
     }
     
     
-
-    bool rational_nt::operator> (const rational_nt& rhs) const {
-	if(trivially_has_same_denom(rhs)) {
-	    const expansion& diff_num = expansion_diff(
-		num_.rep(), rhs.num_.rep()
-	    );
-	    return (diff_num.sign() * denom_.sign() > 0);
-	}
-	const expansion& num_a = expansion_product(
-	    num_.rep(), rhs.denom_.rep()
-	);
-	const expansion& num_b = expansion_product(
-	    rhs.num_.rep(), denom_.rep()
-	);
-	const expansion& diff_num = expansion_diff(num_a, num_b);
-	return (
-	    diff_num.sign() * denom_.sign() * rhs.denom_.sign() > 0
-	);
-    }
-
-    bool rational_nt::operator>= (const rational_nt& rhs) const {
-	if(trivially_has_same_denom(rhs)) {
-	    const expansion& diff_num = expansion_diff(
-		num_.rep(), rhs.num_.rep()
-	    );
-	    return (diff_num.sign() * denom_.sign() >= 0);
-	}
-	const expansion& num_a = expansion_product(
-	    num_.rep(), rhs.denom_.rep()
-	);
-	const expansion& num_b = expansion_product(
-	    rhs.num_.rep(), denom_.rep()
-	);
-	const expansion& diff_num = expansion_diff(num_a, num_b);
-	return (
-	    diff_num.sign() * denom_.sign() * rhs.denom_.sign() >= 0
-	);
-    }
-
-    bool rational_nt::operator< (const rational_nt& rhs) const {
-	if(trivially_has_same_denom(rhs)) {
-	    const expansion& diff_num = expansion_diff(
-		num_.rep(), rhs.num_.rep()
-	    );
-	    return (diff_num.sign() * denom_.sign() < 0);
-	}
-	const expansion& num_a = expansion_product(
-	    num_.rep(), rhs.denom_.rep()
-	);
-	const expansion& num_b = expansion_product(
-	    rhs.num_.rep(), denom_.rep()
-	);
-	const expansion& diff_num = expansion_diff(num_a, num_b);
-	return (
-	    diff_num.sign() * denom_.sign() * rhs.denom_.sign() < 0
-	);
-    }
-
-    bool rational_nt::operator<= (const rational_nt& rhs) const {
-	if(trivially_has_same_denom(rhs)) {
-	    const expansion& diff_num = expansion_diff(
-		num_.rep(), rhs.num_.rep()
-	    );
-	    return (diff_num.sign() * denom_.sign() <= 0);
-	}
-	const expansion& num_a = expansion_product(
-	    num_.rep(), rhs.denom_.rep()
-	);
-	const expansion& num_b = expansion_product(
-	    rhs.num_.rep(), denom_.rep()
-	);
-	const expansion& diff_num = expansion_diff(num_a, num_b);
-	return (
-	    diff_num.sign() * denom_.sign() * rhs.denom_.sign() <= 0
-	);
-    }
-
-    bool rational_nt::operator> (double rhs) const {
-	const expansion& num_b = expansion_product(
-	    denom_.rep(), rhs
-	);
-	const expansion& diff_num = expansion_diff(num_.rep(), num_b);
-	return (diff_num.sign() * denom_.sign() > 0);
-    }
-
-    bool rational_nt::operator>= (double rhs) const {
-	const expansion& num_b = expansion_product(
-	    denom_.rep(), rhs
-	);
-	const expansion& diff_num = expansion_diff(num_.rep(), num_b);
-	return (diff_num.sign() * denom_.sign() >= 0);
-    }
-
-    bool rational_nt::operator< (double rhs) const {
-	const expansion& num_b = expansion_product(
-	    denom_.rep(), rhs
-	);
-	const expansion& diff_num = expansion_diff(num_.rep(), num_b);
-	return (diff_num.sign() * denom_.sign() < 0);
-    }
-
-    bool rational_nt::operator<= (double rhs) const {
-	const expansion& num_b = expansion_product(
-	    denom_.rep(), rhs
-	);
-	const expansion& diff_num = expansion_diff(num_.rep(), num_b);
-	return (diff_num.sign() * denom_.sign() <= 0);
-    }
     
+    Sign rational_nt::compare(const rational_nt& rhs) const {
+	if(has_same_denom(rhs)) {
+	    const expansion& diff_num = expansion_diff(
+		num_.rep(), rhs.num_.rep()
+	    );
+	    return Sign(diff_num.sign() * denom_.sign());
+	}
+	const expansion& num_a = expansion_product(
+	    num_.rep(), rhs.denom_.rep()
+	);
+	const expansion& num_b = expansion_product(
+	    rhs.num_.rep(), denom_.rep()
+	);
+	const expansion& diff_num = expansion_diff(num_a, num_b);
+	return Sign(
+	    diff_num.sign() * denom_.sign() * rhs.denom_.sign()
+	);
+    }
+
+    Sign rational_nt::compare(double rhs) const {
+	const expansion& num_b = expansion_product(
+	    denom_.rep(), rhs
+	);
+	const expansion& diff_num = expansion_diff(num_.rep(), num_b);
+	return Sign(diff_num.sign() * denom_.sign());
+    }
     
     
 }
