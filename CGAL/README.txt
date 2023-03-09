@@ -9,11 +9,14 @@ If you got the Geogram distribution, then you can generate the Pluggable
 Software Module by using tools/extract_psm.sh
 
 To compile it:
-cmake .
+cmake . -DCMAKE_BUILD_TYPE=Release
 make
 
 To test:
-./benchmark ocean_r.xyz
+cat ocean_r.xyz ./benchmark 10
+
+where 10 is the number of times the test should be done, in order to
+have sufficient time to measure meaningful timings.
 
 To compare with CGAL's arbitrary precision type:
 Comment-out the line with "#define CGAL_USE_GEO_EXPANSION" in benchmark.cpp
