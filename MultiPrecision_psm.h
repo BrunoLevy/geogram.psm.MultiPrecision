@@ -199,6 +199,7 @@ namespace GEO {
 // The following works on GCC and ICC
 #if defined(__x86_64)
 #  define GEO_ARCH_64
+#  define GEO_PROCESSOR_X86
 #else
 #  define GEO_ARCH_32
 #endif
@@ -208,6 +209,7 @@ namespace GEO {
 #elif defined(_WIN32) || defined(_WIN64)
 
 #define GEO_OS_WINDOWS
+#define GEO_PROCESSOR_X86
 
 #if defined(_OPENMP)
 #  define GEO_OPENMP
@@ -244,7 +246,7 @@ namespace GEO {
 #  error "Unsupported compiler"
 #endif
 
-#if defined(__x86_64) || defined(__ppc64__) || defined(__arm64__) || defined(__aarch64__)
+#if defined(__x86_64) || defined(__ppc64__) || defined(__arm64__) || defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
 #  define GEO_ARCH_64
 #else
 #  define GEO_ARCH_32
@@ -366,6 +368,27 @@ namespace GEO {
 
 namespace GEO {
 
+    enum Sign {
+        
+        NEGATIVE = -1,
+        
+        ZERO = 0,
+        
+        POSITIVE = 1
+    };
+
+    template <class T>
+    inline Sign geo_sgn(const T& x) {
+        return (x > 0) ? POSITIVE : (
+            (x < 0) ? NEGATIVE : ZERO
+        );
+    }
+
+    template <class T>
+    inline Sign geo_cmp(const T& a, const T& b) {
+        return Sign((a > b) * POSITIVE + (a < b) * NEGATIVE);
+    }
+    
     namespace Numeric {
 
         
@@ -451,25 +474,26 @@ namespace GEO {
         struct Limits : 
             LimitsHelper<T, std::numeric_limits<T>::is_specialized> {
         };
+
+        template <class T> inline void optimize_number_representation(T& x) {
+            geo_argused(x);
+        }
+
+        template <class T> inline Sign ratio_compare(
+            const T& a_num, const T& a_denom, const T& b_num, const T& b_denom
+        ) {
+            if(a_denom == b_denom) {
+                return Sign(geo_cmp(a_num,b_num)*geo_sgn(a_denom));
+            }
+            return Sign(
+                geo_cmp(a_num*b_denom, b_num*a_denom) *
+                geo_sgn(a_denom) * geo_sgn(b_denom)
+            );
+        }
     }
 
     
 
-    enum Sign {
-        
-        NEGATIVE = -1,
-        
-        ZERO = 0,
-        
-        POSITIVE = 1
-    };
-
-    template <class T>
-    inline Sign geo_sgn(const T& x) {
-        return (x > 0) ? POSITIVE : (
-            (x < 0) ? NEGATIVE : ZERO
-        );
-    }
 
     template <class T>
     inline T geo_sqr(T x) {
@@ -506,10 +530,94 @@ namespace GEO {
     inline double round(double x) {
 	return ((x - floor(x)) > 0.5 ? ceil(x) : floor(x));
     }
+
+    
+    
+    static constexpr index_t NO_INDEX = index_t(-1);
+    
+    
 }
 
 #endif
 
+
+/******* extracted from ../basic/psm.h *******/
+
+#ifndef GEOGRAM_BASIC_PSM
+#define GEOGRAM_BASIC_PSM
+
+
+#include <assert.h>
+#include <iostream>
+#include <string>
+
+#ifndef GEOGRAM_PSM
+#define GEOGRAM_PSM
+#endif
+
+#ifndef GEOGRAM_BASIC_ASSERT
+
+#define geo_assert(x) assert(x)
+#define geo_range_assert(x, min_val, max_val) \
+    assert((x) >= (min_val) && (x) <= (max_val))
+#define geo_assert_not_reached assert(0)
+
+#ifdef GEO_DEBUG
+#define geo_debug_assert(x) assert(x)
+#define geo_debug_range_assert(x, min_val, max_val) \
+    assert((x) >= (min_val) && (x) <= (max_val))
+#else
+#define geo_debug_assert(x) 
+#define geo_debug_range_assert(x, min_val, max_val)
+#endif
+
+#ifdef GEO_PARANOID
+#define geo_parano_assert(x) geo_assert(x)
+#define geo_parano_range_assert(x, min_val, max_val) \
+    geo_range_assert(x, min_val, max_val)
+#else
+#define geo_parano_assert(x)
+#define geo_parano_range_assert(x, min_val, max_val)
+#endif
+
+#endif
+
+#ifndef geo_cite
+#define geo_cite(x)
+#endif
+
+#ifndef geo_cite_with_info
+#define geo_cite_with_info(x,y)
+#endif
+
+#ifndef GEOGRAM_BASIC_LOGGER
+
+namespace GEO {
+    namespace Logger {
+        inline std::ostream& out(const std::string& name) {
+            return std::cout << " [" << name << "]";
+        }
+
+        inline std::ostream& err(const std::string& name) {
+            return std::cerr << "E[" << name << "]";
+        }
+
+        inline std::ostream& warn(const std::string& name) {
+            return std::cerr << "W[" << name << "]";
+        }
+    }
+    
+}
+
+#endif
+
+#ifndef FPG_UNCERTAIN_VALUE
+#define FPG_UNCERTAIN_VALUE 0
+#endif
+
+#define GEOGRAM_WITH_PDEL
+
+#endif
 
 /******* extracted from ../basic/memory.h *******/
 
@@ -534,6 +642,19 @@ namespace GEO {
 
 #include <unistd.h>
 
+#endif
+
+// Stack size depending on OS:
+// Linux: 10 Mb
+// Windows: 1 Mb
+// Mac OSX: 512 Kb
+// GEO_HAS_BIG_STACK is defined under Linux
+// and lets some of the functions that
+// manipulate exact precision numbers
+// allocate temporaries on the stack.
+
+#ifdef GEO_OS_LINUX
+#define GEO_HAS_BIG_STACK
 #endif
 
 
@@ -938,373 +1059,56 @@ namespace GEO {
 #endif
 
 
-/******* extracted from ../basic/atomics.h *******/
-
-#ifndef GEOGRAM_BASIC_ATOMICS
-#define GEOGRAM_BASIC_ATOMICS
-
-
-
-#ifdef GEO_OS_LINUX
-#  if defined(GEO_OS_EMSCRIPTEN) 
-#    define GEO_USE_DUMMY_ATOMICS
-#  elif defined(GEO_OS_RASPBERRY)
-#    define GEO_USE_ARM32_ATOMICS
-#  elif defined(GEO_OS_ANDROID)
-#    define GEO_USE_ANDROID_ATOMICS
-#  else
-#    define GEO_USE_X86_ATOMICS
-#  endif
-#endif
-
-#if defined(GEO_USE_DUMMY_ATOMICS)
-
-inline void geo_pause() {
-}
-
-inline char atomic_bittestandset_x86(volatile unsigned int*, unsigned int) {
-    return 0;
-}
-
-inline char atomic_bittestandreset_x86(volatile unsigned int*, unsigned int) {
-    return 0;
-}
-
-#elif defined(GEO_USE_ANDROID_ATOMICS)
-
-
-typedef GEO::Numeric::uint32 android_mutex_t;
-
-inline void lock_mutex_android(volatile android_mutex_t* lock) {
-    while(__sync_lock_test_and_set(lock, 1) != 0);
-}
-
-inline void unlock_mutex_android(volatile android_mutex_t* lock) {
-    __sync_lock_release(lock);
-}
-
-inline unsigned int atomic_bitset_android(volatile unsigned int* ptr, unsigned int bit) {
-    return __sync_fetch_and_or(ptr, 1u << bit) & (1u << bit);
-}
-
-inline unsigned int atomic_bitreset_android(volatile unsigned int* ptr, unsigned int bit) {
-    return __sync_fetch_and_and(ptr, ~(1u << bit)) & (1u << bit);
-}
-
-inline void memory_barrier_android() {
-    // Full memory barrier.
-    __sync_synchronize();
-}
-
-inline void wait_for_event_android() {
-    /* TODO */    
-}
-
-inline void send_event_android() {
-    /* TODO */    
-}
-
-#elif defined(GEO_USE_ARM32_ATOMICS)
-
-
-typedef GEO::Numeric::uint32 arm32_mutex_t;
-
-inline void lock_mutex_arm32(volatile arm32_mutex_t* lock) {
-    arm_mutex_t tmp;
-    __asm__ __volatile__ (
-        "1:     ldrex   %0, [%1]     \n" // read lock
-        "       cmp     %0, #0       \n" // check if zero
-        "       wfene                \n" // wait for event if non-zero
-        "       strexeq %0, %2, [%1] \n" // attempt to store new value
-        "       cmpeq   %0, #0       \n" // test if store succeeded
-        "       bne     1b           \n" // retry if not
-        "       dmb                  \n" // memory barrier
-        : "=&r" (tmp)
-        : "r" (lock), "r" (1)
-        : "cc", "memory");
-}
-
-inline void unlock_mutex_arm32(volatile arm32_mutex_t* lock) {
-    __asm__ __volatile__ (
-        "       dmb              \n" // ensure all previous access are observed
-        "       str     %1, [%0] \n" // clear the lock
-        "       dsb              \n" // ensure completion of clear lock ...
-        "       sev              \n" // ... before sending the event
-        :
-        : "r" (lock), "r" (0)
-        : "cc", "memory");
-}
-
-inline unsigned int atomic_bitset_arm32(volatile unsigned int* ptr, unsigned int bit) {
-    unsigned int tmp;
-    unsigned int result;
-    unsigned int OK;
-    __asm__ __volatile__ (
-        "1:     ldrex   %1, [%5]           \n" // result = *ptr
-        "       orr     %0, %1, %6, LSL %4 \n" // tmp = result OR (1 << bit)
-        "       strex   %2, %0, [%5]       \n" // *ptr = tmp, status in OK
-        "       teq     %2, #0             \n" // if !OK then
-        "       bne     1b                 \n" //    goto 1:
-        "       and     %1, %1, %6, LSL %4 \n" // result = result AND (1 << bit)
-        : "=&r" (tmp), "=&r" (result), "=&r" (OK), "+m" (*ptr)
-        : "r" (bit), "r" (ptr), "r" (1)
-        : "cc"
-    );
-    return result;
-}
-
-inline unsigned int atomic_bitreset_arm32(volatile unsigned int* ptr, unsigned int bit) {
-    unsigned int tmp;
-    unsigned int result;
-    unsigned int OK;
-    __asm__ __volatile__ (
-        "1:     ldrex   %1, [%5]           \n" // result = *ptr
-        "       bic     %0, %1, %6, LSL %4 \n" // tmp = result AND NOT(1 << bit)
-        "       strex   %2, %0, [%5]       \n" // *ptr = tmp, status in OK
-        "       teq     %2, #0             \n" // if !OK then
-        "       bne     1b                 \n" //    goto 1:
-        "       and     %1, %1, %6, LSL %4 \n" // result = result AND (1 << bit)
-        : "=&r" (tmp), "=&r" (result), "=&r" (OK), "+m" (*ptr)
-        : "r" (bit), "r" (ptr), "r" (1)
-        : "cc"
-    );
-    return result;
-}
-
-inline void memory_barrier_arm32() {
-    __asm__ __volatile__ (
-        "dmb \n"
-        : : : "memory"
-    );
-}
-
-inline void wait_for_event_arm32() {
-    __asm__ __volatile__ (
-        "wfe \n"
-        : : : 
-    );
-}
-
-inline void send_event_arm32() {
-    __asm__ __volatile__ (
-        "dsb \n" // ensure completion of store operations
-        "sev \n"
-        : : : 
-    );
-}
-
-#elif defined(GEO_USE_X86_ATOMICS)
-
-#  define GEO_USE_X86_PAUSE
-
-#  ifdef GEO_USE_X86_PAUSE
-
-inline void geo_pause() {
-    __asm__ __volatile__ (
-        "pause;\n"
-    );
-}
-
-#  else
-#    ifdef __ICC
-#      define geo_pause _mm_pause
-#    else
-#      define geo_pause __builtin_ia32_pause
-#    endif
-
-#  endif
-
-inline char atomic_bittestandset_x86(volatile unsigned int* ptr, unsigned int bit) {
-    char out;
-#if defined(__x86_64)
-    __asm__ __volatile__ (
-        "lock; bts %2,%1\n"  // set carry flag if bit %2 (bit) of %1 (ptr) is set
-                             //   then set bit %2 of %1
-        "sbb %0,%0\n"        // set %0 (out) if carry flag is set
-        : "=r" (out), "=m" (*ptr)
-        : "Ir" (bit)
-        : "memory"
-    );
-#else
-    __asm__ __volatile__ (
-        "lock; bts %2,%1\n"  // set carry flag if bit %2 (bit) of %1 (ptr) is set
-                             //   then set bit %2 of %1
-        "sbb %0,%0\n"        // set %0 (out) if carry flag is set
-        : "=q" (out), "=m" (*ptr)
-        : "Ir" (bit)
-        : "memory"
-    );
-#endif
-    return out;
-}
-
-inline char atomic_bittestandreset_x86(volatile unsigned int* ptr, unsigned int bit) {
-    char out;
-#if defined(__x86_64)
-    __asm__ __volatile__ (
-        "lock; btr %2,%1\n"  // set carry flag if bit %2 (bit) of %1 (ptr) is set
-                             //   then reset bit %2 of %1
-        "sbb %0,%0\n"        // set %0 (out) if carry flag is set
-        : "=r" (out), "=m" (*ptr)
-        : "Ir" (bit)
-        : "memory"
-    );
-#else
-    __asm__ __volatile__ (
-        "lock; btr %2,%1\n"  // set carry flag if bit %2 (bit) of %1 (ptr) is set
-                             //   then reset bit %2 of %1
-        "sbb %0,%0\n"        // set %0 (out) if carry flag is set
-        : "=q" (out), "=m" (*ptr)
-        : "Ir" (bit)
-        : "memory"
-    );
-#endif
-    return out;
-}
-
-#elif defined(GEO_OS_APPLE)
-
-#include <libkern/OSAtomic.h>
-
-#elif defined(GEO_OS_WINDOWS)
-
-#include <windows.h>
-#include <intrin.h>
-#pragma intrinsic(_InterlockedCompareExchange8)
-#pragma intrinsic(_InterlockedCompareExchange16)
-#pragma intrinsic(_InterlockedCompareExchange)
-#pragma intrinsic(_interlockedbittestandset)
-#pragma intrinsic(_interlockedbittestandreset)
-#pragma intrinsic(_ReadBarrier)
-#pragma intrinsic(_WriteBarrier)
-#pragma intrinsic(_ReadWriteBarrier)
-
-#  ifdef GEO_COMPILER_MINGW
-inline void geo_pause() {
-}
-#  endif
-
-#endif // GEO_OS_WINDOWS
-
-#endif
-
-
 /******* extracted from ../basic/thread_sync.h *******/
 
 #ifndef GEOGRAM_BASIC_THREAD_SYNC
 #define GEOGRAM_BASIC_THREAD_SYNC
 
+
 #include <vector>
+#include <atomic>
 
-#ifdef GEO_OS_APPLE
-# define GEO_USE_DEFAULT_SPINLOCK_ARRAY
-# include <AvailabilityMacros.h>
-# if defined(MAC_OS_X_VERSION_10_12) && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
-#   define GEO_APPLE_HAS_UNFAIR_LOCK 1
-#   include <os/lock.h>
-# endif
-# if defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED >= __IPHONE_10_0
-#   define GEO_APPLE_HAS_UNFAIR_LOCK 1
-#   include <os/lock.h>
-# endif
+// On Windows/MSCV, we need to use a special implementation
+// of spinlocks because std::atomic_flag in MSVC's stl does
+// not fully implement the norm (lacks a constructor).
+#ifdef GEO_OS_WINDOWS
+#include <windows.h>
+#include <intrin.h>
+#pragma intrinsic(_InterlockedCompareExchange16)
+#pragma intrinsic(_WriteBarrier)
 #endif
 
-#ifdef geo_debug_assert
-#define geo_thread_sync_assert(x) geo_debug_assert(x)
+// On MacOS, I get many warnings with atomic_flag initialization,
+// such as std::atomic_flag f = ATOMIC_FLAG_INIT
+#if defined(__clang__)
+#pragma GCC diagnostic ignored "-Wbraced-scalar-init"
+#endif
+
+inline void geo_pause() {
+#ifdef GEO_OS_WINDOWS
+    YieldProcessor();
 #else
-#define geo_thread_sync_assert(x) 
+#  ifdef GEO_PROCESSOR_X86
+#    ifdef __ICC
+    _mm_pause();
+#    else
+    __builtin_ia32_pause();
+#    endif
+#  endif
 #endif
+}
 
+
+
+#ifdef GEO_OS_WINDOWS
+
+// Windows-specific spinlock implementation.
+// I'd have prefered to use std::atomic_flag for everybody,
+// unfortunately atomic_flag's constructor is not implemented in MSCV's stl,
+// so we reimplement them using atomic compare-exchange functions...
 
 namespace GEO {
-
     namespace Process {
-
-#if defined(GEO_OS_RASPBERRY)
-
-        
-        typedef arm32_mutex_t spinlock;
-
-        
-#       define GEOGRAM_SPINLOCK_INIT 0
-        inline void acquire_spinlock(spinlock& x) {
-            lock_mutex_arm32(&x);
-        }
-
-        inline void release_spinlock(spinlock& x) {
-            unlock_mutex_arm32(&x);
-        }
-	
-#elif defined(GEO_OS_ANDROID)
-
-        
-        typedef android_mutex_t spinlock;
-
-        
-#       define GEOGRAM_SPINLOCK_INIT 0
-        inline void acquire_spinlock(spinlock& x) {
-            lock_mutex_android(&x);
-        }
-
-        inline void release_spinlock(spinlock& x) {
-            unlock_mutex_android(&x);
-        }
-
-#elif defined(GEO_OS_LINUX) || defined(GEO_COMPILER_MINGW)
-
-        
-        typedef unsigned char spinlock;
-
-        
-#       define GEOGRAM_SPINLOCK_INIT 0
-        inline void acquire_spinlock(volatile spinlock& x) {
-            while(__sync_lock_test_and_set(&x, 1) == 1) {
-                // Intel recommends to have a PAUSE asm instruction
-                // in the spinlock loop.
-                geo_pause();
-            }
-        }
-
-        inline void release_spinlock(volatile spinlock& x) {
-            // Note: Since on intel processor, memory writes
-            // (of data types <= bus size) are atomic, we could
-            // simply write 'x=0' instead, but this would
-            // lack the 'memory barrier with release semantics'
-            // required to avoid compiler and/or processor
-            // reordering (important for relaxed memory
-            // models such as Itanium processors).
-            __sync_lock_release(&x);
-        }
-
-#elif defined(GEO_OS_APPLE)
-
-#if defined(GEO_APPLE_HAS_UNFAIR_LOCK)
-        
-        typedef os_unfair_lock spinlock;
-        
-        
-#       define GEOGRAM_SPINLOCK_INIT OS_UNFAIR_LOCK_INIT
-        //inline void init_spinlock(spinlock & s) { s = OS_UNFAIR_LOCK_INIT; }
-        //inline bool try_acquire_spinlock (spinlock & s) { return os_unfair_lock_trylock(&s); }
-        inline void acquire_spinlock    (spinlock & s) { os_unfair_lock_lock(&s); }
-        inline void release_spinlock  (spinlock & s) { os_unfair_lock_unlock(&s); }
-#else
-        
-        typedef OSSpinLock spinlock;
-
-        
-#       define GEOGRAM_SPINLOCK_INIT OS_SPINLOCK_INIT
-        inline void acquire_spinlock(volatile spinlock& x) {
-            OSSpinLockLock(&x);
-        }
-
-        inline void release_spinlock(volatile spinlock& x) {
-            OSSpinLockUnlock(&x);
-        }
-#endif // __MAC_10_12
-
-#elif defined(GEO_OS_WINDOWS) && !defined(GEO_COMPILER_MINGW)
-
         
         typedef short spinlock;
 
@@ -1325,138 +1129,160 @@ namespace GEO {
         }
 
         inline void release_spinlock(volatile spinlock& x) {
-            _WriteBarrier();   // prevents compiler reordering
+            _WriteBarrier(); // prevents compiler reordering
             x = 0;
         }
+        
+    }
+}
 
+
+
+#else
+
+namespace GEO {
+    namespace Process {
+
+        
+        // Note: C++20 does not need it anymore, in C++20
+        // std::atomic_flag's constructor initializes it,
+        // we keep it because
+        // - we are using C++17
+        // - the Windows implementation that uses integers rather than
+        //   std::atomic_flag needs an initialization value.
+#define GEOGRAM_SPINLOCK_INIT ATOMIC_FLAG_INIT 
+
+        typedef std::atomic_flag spinlock;
+
+        inline void acquire_spinlock(volatile spinlock& x) {
+            for (;;) {
+                if (!x.test_and_set(std::memory_order_acquire)) {
+                    break;
+                }
+// If compiling in C++20 we can be slightly more efficient when spinning
+// (avoid unrequired atomic operations, just "peek" the flag)
+#if defined(__cpp_lib_atomic_flag_test)                
+                while (x.test(std::memory_order_relaxed)) 
+#endif
+                    geo_pause();
+            }            
+        }
+
+        inline void release_spinlock(volatile spinlock& x) {
+            x.clear(std::memory_order_release); 
+        }
+        
+    }
+}
 #endif
 
-#if defined(GEO_USE_DEFAULT_SPINLOCK_ARRAY)
 
-        // TODO: implement memory-efficient version for
-        // MacOSX MacOSX does have atomic bit
-        // manipulation routines (OSAtomicTestAndSet()),
-        // and also  has OSAtomicAnd32OrigBarrier() and
-        // OSAtomicOr32OrigBarrier() functions that can
-        // be used instead (Orig for 'return previous value'
-        // and Barrier for ('include a memory barrier').
-        // Android needs additional routines in atomics.h/atomics.cpp
 
-        class SpinLockArray {
+namespace GEO {
+    namespace Process {
+    
+        class BasicSpinLockArray {
         public:
-            SpinLockArray() {
+            BasicSpinLockArray() : spinlocks_(nullptr), size_(0) {
             }
 
-            SpinLockArray(index_t size_in) {
+            BasicSpinLockArray(index_t size_in) : spinlocks_(nullptr), size_(0) {
                 resize(size_in);
             }
 
+            BasicSpinLockArray(const BasicSpinLockArray& rhs) = delete;
+
+            BasicSpinLockArray& operator=(
+                const BasicSpinLockArray& rhs
+            ) = delete;
+            
             void resize(index_t size_in) {
-                spinlocks_.assign(size_in, GEOGRAM_SPINLOCK_INIT);
+                delete[] spinlocks_;
+                spinlocks_ = new spinlock[size_in];
+                size_ = size_in;
+                // Need to initialize the spinlocks to false (dirty !)
+                // (maybe use placement new on each item..., to be tested)
+                for(index_t i=0; i<size_; ++i) {
+                    Process::release_spinlock(spinlocks_[i]);
+                }
             }
 
             void clear() {
-                spinlocks_.clear();
+                delete[] spinlocks_;
+                spinlocks_ = nullptr;
             }
 
             index_t size() const {
-                return index_t(spinlocks_.size());
+                return size_;
             }
 
             void acquire_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
+                geo_debug_assert(i < size());
                 GEO::Process::acquire_spinlock(spinlocks_[i]);
             }
 
             void release_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
+                geo_debug_assert(i < size());
                 GEO::Process::release_spinlock(spinlocks_[i]);
             }
 
         private:
-            std::vector<spinlock> spinlocks_;
-        };
-
-#elif defined(GEO_OS_RASPBERRY) 
-
-        class SpinLockArray {
-        public:
-            typedef Numeric::uint32 word_t;
-
-            SpinLockArray() : size_(0) {
-            }
-
-            SpinLockArray(index_t size_in) : size_(0) {
-                resize(size_in);
-            }
-
-            void resize(index_t size_in) {
-                if(size_ != size_in) {
-                    size_ = size_in;
-                    index_t nb_words = (size_ >> 5) + 1;
-                    spinlocks_.assign(nb_words, 0);
-                }
-            }
-
-            index_t size() const {
-                return size_;
-            }
-
-            void clear() {
-                spinlocks_.clear();
-            }
-
-            void acquire_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
-                index_t w = i >> 5;
-                word_t b = word_t(i & 31);
-                // Loop while previously stored value has its bit set.
-                while((atomic_bitset_arm32(&spinlocks_[w], b)) != 0) {
-                    // If somebody else has the lock, sleep.
-                    //  It is important to sleep here, else atomic_bitset_xxx()
-                    // keeps acquiring the exclusive monitor (even for testing)
-                    // and this slows down everything.
-                    wait_for_event_arm32();
-                }
-                memory_barrier_arm32();
-            }
-
-            void release_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
-                memory_barrier_android();
-                index_t w = i >> 5;
-                word_t b = word_t(i & 31);
-                atomic_bitreset_arm32(&spinlocks_[w], b);
-                //   Now wake up the other threads that started
-                // sleeping if they did not manage to acquire
-                // the lock.
-                send_event_arm32();
-            }
-
-        private:
-            std::vector<word_t> spinlocks_;
+            // Cannot use a std::vector because std::atomic_flag does not
+            // have copy ctor nor assignment operator.
+            spinlock* spinlocks_;
             index_t size_;
         };
-	
-#elif defined(GEO_OS_ANDROID) 
+    }
+}
 
-        class SpinLockArray {
+
+
+namespace GEO {
+    namespace Process {
+
+        class CompactSpinLockArray {
         public:
-            typedef Numeric::uint32 word_t;
-
-            SpinLockArray() : size_(0) {
+            CompactSpinLockArray() : spinlocks_(nullptr), size_(0) {
             }
 
-            SpinLockArray(index_t size_in) : size_(0) {
+            CompactSpinLockArray(index_t size_in) : spinlocks_(nullptr),size_(0){
                 resize(size_in);
             }
 
+            ~CompactSpinLockArray() {
+                clear();
+            }
+            
+            CompactSpinLockArray(const CompactSpinLockArray& rhs) = delete;
+
+            CompactSpinLockArray& operator=(
+                const CompactSpinLockArray& rhs
+            ) = delete;
+            
             void resize(index_t size_in) {
                 if(size_ != size_in) {
                     size_ = size_in;
                     index_t nb_words = (size_ >> 5) + 1;
-                    spinlocks_.assign(nb_words, 0);
+                    delete[] spinlocks_;
+                    spinlocks_ = new std::atomic<uint32_t>[nb_words];
+                    for(index_t i=0; i<nb_words; ++i) {
+                        // Note: std::atomic_init() is deprecated in C++20
+                        // that can initialize std::atomic through its
+                        // non-default constructor. We'll need to do something
+                        // else when we'll switch to C++20 (placement new...)
+                        std::atomic_init(&spinlocks_[i],0u);
+                    }
                 }
+// Test at compile time that we are using atomic uint32_t operations (and not
+// using an additional lock which would be catastrophic in terms of performance)
+#ifdef __cpp_lib_atomic_is_always_lock_free                
+                static_assert(std::atomic<uint32_t>::is_always_lock_free);
+#else
+// If we cannot test that at compile time, we test that at runtime in debug
+// mode (so that we will be notified in the non-regression test if one of
+// the platforms has the problem, which is very unlikely though...)
+                geo_debug_assert(size_ == 0 || spinlocks_[0].is_lock_free());
+#endif                
             }
 
             index_t size() const {
@@ -1464,335 +1290,478 @@ namespace GEO {
             }
 
             void clear() {
-                spinlocks_.clear();
+                delete[] spinlocks_;
+                size_ = 0;
             }
 
             void acquire_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
-                index_t w = i >> 5;
-                word_t b = word_t(i & 31);
-                // Loop while previously stored value has its bit set.
-                while((atomic_bitset_android(&spinlocks_[w], b)) != 0) {
-                    // If somebody else has the lock, sleep.
-                    //  It is important to sleep here, else atomic_bitset_xxx()
-                    // keeps acquiring the exclusive monitor (even for testing)
-                    // and this slows down everything.
-                    wait_for_event_android();
-                }
-                memory_barrier_android();
-            }
-
-            void release_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
-                memory_barrier_android();
-                index_t w = i >> 5;
-                word_t b = word_t(i & 31);
-                atomic_bitreset_android(&spinlocks_[w], b);
-                //   Now wake up the other threads that started
-                // sleeping if they did not manage to acquire
-                // the lock.
-                send_event_android();
-            }
-
-        private:
-            std::vector<word_t> spinlocks_;
-            index_t size_;
-        };
-
-#elif defined(GEO_OS_LINUX) 
-
-        class SpinLockArray {
-        public:
-            typedef Numeric::uint32 word_t;
-
-            SpinLockArray() : size_(0) {
-            }
-
-            SpinLockArray(index_t size_in) : size_(0) {
-                resize(size_in);
-            }
-
-            void resize(index_t size_in) {
-                if(size_ != size_in) {
-                    size_ = size_in;
-                    index_t nb_words = (size_ >> 5) + 1;
-                    spinlocks_.assign(nb_words, 0);
-                }
-            }
-
-            index_t size() const {
-                return size_;
-            }
-
-            void clear() {
-                spinlocks_.clear();
-            }
-
-            void acquire_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
-                index_t w = i >> 5;
-                index_t b = i & 31;
-                while(atomic_bittestandset_x86(&spinlocks_[w], Numeric::uint32(b))) {
-                    // Intel recommends to have a PAUSE asm instruction
-                    // in the spinlock loop. It is generated using the
-                    // following intrinsic function of GCC.
+                geo_debug_assert(i < size());
+                index_t  w = i >> 5;
+                uint32_t b = uint32_t(i & 31);
+                uint32_t mask = (1u << b);
+                while(
+                    (spinlocks_[w].fetch_or(
+                        mask, std::memory_order_acquire
+                    ) & mask) != 0
+                ) {
                     geo_pause();
                 }
             }
 
             void release_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
-                index_t w = i >> 5;
-                index_t b = i & 31;
-                // Note: we need here to use a synchronized bit reset
-                // since &= is not atomic.
-                atomic_bittestandreset_x86(&spinlocks_[w], Numeric::uint32(b));
+                geo_debug_assert(i < size());
+                index_t  w = i >> 5;
+                uint32_t b = uint32_t(i & 31);
+                uint32_t mask = ~(1u << b);
+                spinlocks_[w].fetch_and(mask, std::memory_order_release);
             }
 
         private:
-            std::vector<word_t> spinlocks_;
+            // Cannot use a std::vector because std::atomic<> does not
+            // have copy ctor nor assignment operator.
+            std::atomic<uint32_t>* spinlocks_;
             index_t size_;
         };
-
-#elif defined(GEO_OS_WINDOWS)
-        class SpinLockArray {
-        public:
-            typedef LONG word_t;
-
-            SpinLockArray() : size_(0) {
-            }
-
-            SpinLockArray(index_t size_in) : size_(0) {
-                resize(size_in);
-            }
-
-            void resize(index_t size_in) {
-                if(size_ != size_in) {
-                    size_ = size_in;
-                    index_t nb_words = (size_ >> 5) + 1;
-                    spinlocks_.assign(nb_words, 0);
-                }
-            }
-
-            index_t size() const {
-                return size_;
-            }
-
-            void clear() {
-                spinlocks_.clear();
-            }
-
-            void acquire_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
-                index_t w = i >> 5;
-                index_t b = i & 31;
-                while(_interlockedbittestandset((long *)(&spinlocks_[w]), long(b))) {
-                    // Intel recommends to have a PAUSE asm instruction
-                    // in the spinlock loop. Under MSVC/Windows,
-                    // YieldProcessor() is a macro that calls the
-                    // (undocumented) _mm_pause() intrinsic function
-                    // that generates a PAUSE opcode.
-                    YieldProcessor();
-                }
-                // We do not need here _ReadBarrier() since
-                // _interlockedbittestandset
-                // "acts as a full barrier in VC2005" according to the doc
-            }
-
-            void release_spinlock(index_t i) {
-                geo_thread_sync_assert(i < size());
-                index_t w = i >> 5;
-                index_t b = i & 31;
-                // Note1: we need here to use a synchronized bit reset
-                // since |= is not atomic.
-                // Note2: We do not need here _WriteBarrier() since
-                // _interlockedbittestandreset
-                // "acts as a full barrier in VC2005" according to the doc
-                _interlockedbittestandreset((long*)(&spinlocks_[w]), long(b));
-            }
-
-        private:
-            std::vector<word_t> spinlocks_;
-            index_t size_;
-        };
-
-#else
-
-#error Found no implementation of SpinLockArray
-
-#endif
-
-
-    }
-
-#ifdef GEO_OS_WINDOWS
-
-    // Emulation of pthread mutexes using Windows API
-
-    typedef CRITICAL_SECTION pthread_mutex_t;
-    typedef unsigned int pthread_mutexattr_t;
-    
-    inline int pthread_mutex_lock(pthread_mutex_t *m) {
-        EnterCriticalSection(m);
-        return 0;
-    }
-
-    inline int pthread_mutex_unlock(pthread_mutex_t *m) {
-        LeaveCriticalSection(m);
-        return 0;
-    }
         
-    inline int pthread_mutex_trylock(pthread_mutex_t *m) {
-        return TryEnterCriticalSection(m) ? 0 : EBUSY; 
     }
-
-    inline int pthread_mutex_init(pthread_mutex_t *m, pthread_mutexattr_t *a) {
-        geo_argused(a);
-        InitializeCriticalSection(m);
-        return 0;
-    }
-
-    inline int pthread_mutex_destroy(pthread_mutex_t *m) {
-        DeleteCriticalSection(m);
-        return 0;
-    }
-
-
-    // Emulation of pthread condition variables using Windows API
-
-    typedef CONDITION_VARIABLE pthread_cond_t;
-    typedef unsigned int pthread_condattr_t;
-
-    inline int pthread_cond_init(pthread_cond_t *c, pthread_condattr_t *a) {
-        geo_argused(a);
-        InitializeConditionVariable(c);
-        return 0;
-    }
-
-    inline int pthread_cond_destroy(pthread_cond_t *c) {
-        geo_argused(c);
-        return 0;
-    }
-
-    inline int pthread_cond_broadcast(pthread_cond_t *c) {
-        WakeAllConditionVariable(c);
-        return 0;
-    }
-
-    inline int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
-        SleepConditionVariableCS(c, m, INFINITE);
-        return 0;
-    }
-   
-#endif    
-    
 }
 
-#endif
 
-
-/******* extracted from ../basic/psm.h *******/
-
-#ifndef GEOGRAM_BASIC_PSM
-#define GEOGRAM_BASIC_PSM
-
-
-#include <assert.h>
-#include <iostream>
-#include <string>
-
-#ifndef GEOGRAM_PSM
-#define GEOGRAM_PSM
-#endif
-
-#ifndef GEOGRAM_BASIC_ASSERT
-
-#define geo_assert(x) assert(x)
-#define geo_range_assert(x, min_val, max_val) \
-    assert((x) >= (min_val) && (x) <= (max_val))
-#define geo_assert_not_reached assert(0)
-
-#ifdef GEO_DEBUG
-#define geo_debug_assert(x) assert(x)
-#define geo_debug_range_assert(x, min_val, max_val) \
-    assert((x) >= (min_val) && (x) <= (max_val))
-#else
-#define geo_debug_assert(x) 
-#define geo_debug_range_assert(x, min_val, max_val)
-#endif
-
-#ifdef GEO_PARANOID
-#define geo_parano_assert(x) geo_assert(x)
-#define geo_parano_range_assert(x, min_val, max_val) \
-    geo_range_assert(x, min_val, max_val)
-#else
-#define geo_parano_assert(x)
-#define geo_parano_range_assert(x, min_val, max_val)
-#endif
-
-#endif
-
-#ifndef geo_cite
-#define geo_cite(x)
-#endif
-
-#ifndef geo_cite_with_info
-#define geo_cite_with_info(x,y)
-#endif
-
-#ifndef GEOGRAM_BASIC_LOGGER
-
-namespace GEO {
-    namespace Logger {
-        inline std::ostream& out(const std::string& name) {
-            return std::cout << " [" << name << "]";
-        }
-
-        inline std::ostream& err(const std::string& name) {
-            return std::cerr << "E[" << name << "]";
-        }
-
-        inline std::ostream& warn(const std::string& name) {
-            return std::cerr << "W[" << name << "]";
-        }
-    }
-    
-}
-
-#endif
-
-#ifndef FPG_UNCERTAIN_VALUE
-#define FPG_UNCERTAIN_VALUE 0
-#endif
-
-
-
-#ifndef GEOGRAM_BASIC_THREAD_SYNC
-#define GEOGRAM_SPINLOCK_INIT 0
 
 namespace GEO {
     namespace Process {
-    
-        typedef int spinlock;
-        
-        inline void acquire_spinlock(spinlock& x) {
-            // Not implemented yet for PSMs
-            geo_argused(x);
-            geo_assert_not_reached;
-        }
-    
-        inline void release_spinlock(spinlock& x) {
-            // Not implemented yet for PSMs
-            geo_argused(x); 
-            geo_assert_not_reached;       
-        }
+        typedef CompactSpinLockArray SpinLockArray;
     }
 }
+
+
+
 #endif
 
-#define GEOGRAM_WITH_PDEL
+
+/******* extracted from ../basic/determinant.h *******/
+
+#ifndef GEOGRAM_BASIC_DETERMINANT
+#define GEOGRAM_BASIC_DETERMINANT
+
+
+
+namespace GEO {
+
+    
+
+    template <class T>
+    inline T det2x2(
+        const T& a11, const T& a12,                    
+        const T& a21, const T& a22
+    ) {                                 
+        return a11*a22-a12*a21 ;
+    }
+
+    template <class T>    
+    inline T det3x3(
+        const T& a11, const T& a12, const T& a13,                
+        const T& a21, const T& a22, const T& a23,                
+        const T& a31, const T& a32, const T& a33
+    ) {
+    return
+         a11*det2x2(a22,a23,a32,a33)   
+        -a21*det2x2(a12,a13,a32,a33)   
+        +a31*det2x2(a12,a13,a22,a23);
+    }   
+
+
+    template <class T>    
+    inline T det4x4(
+        const T& a11, const T& a12, const T& a13, const T& a14,
+        const T& a21, const T& a22, const T& a23, const T& a24,               
+        const T& a31, const T& a32, const T& a33, const T& a34,  
+        const T& a41, const T& a42, const T& a43, const T& a44  
+    ) {
+        T m12 = a21*a12 - a11*a22;
+        T m13 = a31*a12 - a11*a32;
+        T m14 = a41*a12 - a11*a42;
+        T m23 = a31*a22 - a21*a32;
+        T m24 = a41*a22 - a21*a42;
+        T m34 = a41*a32 - a31*a42;
+
+        T m123 = m23*a13 - m13*a23 + m12*a33;
+        T m124 = m24*a13 - m14*a23 + m12*a43;
+        T m134 = m34*a13 - m14*a33 + m13*a43;
+        T m234 = m34*a23 - m24*a33 + m23*a43;
+        
+        return (m234*a14 - m134*a24 + m124*a34 - m123*a44);
+    }   
+}
 
 #endif
+
+/******* extracted from ../basic/rationalg.h *******/
+
+#ifndef GEOGRAM_BASIC_RATIONALG
+#define GEOGRAM_BASIC_RATIONALG
+
+
+
+namespace GEO {
+
+    template <class T> class rationalg {
+      public:
+        typedef T value_type;
+
+        rationalg() = default;
+        
+        explicit rationalg(double x) : num_(x), denom_(1.0) {
+        }
+
+        explicit rationalg(const T& x) : num_(x), denom_(1.0) {
+        }
+
+        explicit rationalg(T&& x) : num_(x), denom_(1.0) {
+        }
+        
+        explicit rationalg(double num, double denom)
+	    : num_(num), denom_(denom) {
+        }
+        
+        explicit rationalg(const T& num, const T& denom)
+	    : num_(num), denom_(denom) {
+        }
+
+        explicit rationalg(
+            T&& num, T&& denom
+        ) : num_(num), denom_(denom) {
+        }
+            
+        rationalg(const rationalg<T>& rhs) = default;
+        
+        rationalg(rationalg<T>&& rhs) = default;
+        
+        rationalg<T>& operator= (const rationalg<T>& rhs) = default;
+
+        rationalg<T>& operator= (rationalg<T>&& rhs) = default;
+        
+	const T& num() const {
+	    return num_;
+	}
+
+	const T& denom() const {
+	    return denom_;
+	}
+
+	 T& num() {
+	    return num_;
+	}
+
+	 T& denom() {
+	    return denom_;
+	}
+
+        void optimize() {
+            Numeric::optimize_number_representation(num_);
+            Numeric::optimize_number_representation(denom_);
+        }
+         
+        
+
+        rationalg<T>& operator+= (const rationalg<T>& rhs) {
+	    if(has_same_denom(rhs)) {
+		num_ += rhs.num_;
+	    } else {
+		num_ = num_ * rhs.denom_ + rhs.num_ * denom_;	    
+		denom_ *= rhs.denom_;
+	    }
+	    return *this;
+	}
+
+        rationalg<T>& operator-= (const rationalg<T>& rhs) {
+	    if(has_same_denom(rhs)) {
+		num_ -= rhs.num_;
+	    } else {
+		num_ = num_ * rhs.denom_ - rhs.num_ * denom_;	    
+		denom_ *= rhs.denom_;
+	    }
+	    return *this;
+	}
+
+        rationalg<T>& operator*= (const rationalg<T>& rhs) {
+	    num_ *= rhs.num_;
+	    denom_ *= rhs.denom_;
+	    return *this;
+	}
+
+        rationalg<T>& operator/= (const rationalg<T>& rhs) {
+	    num_ *= rhs.denom_;
+	    denom_ *= rhs.num_;
+	    return *this;
+	}
+	
+        rationalg<T>& operator+= (double rhs) {
+	    num_ += denom_ * T(rhs);
+	    return *this;
+	}
+
+        rationalg<T>& operator-= (double rhs) {
+	    num_ -= denom_ * T(rhs);
+	    return *this;
+	}
+
+        rationalg<T>& operator*= (double rhs) {
+	    num_ *= T(rhs);
+	    return *this;
+	}
+
+        rationalg<T>& operator/= (double rhs) {
+	    denom_ *= T(rhs);
+	    return *this;
+	}
+	
+        
+
+        rationalg<T> operator+ (const rationalg<T>& rhs) const {
+	    if(has_same_denom(rhs)) {
+		return rationalg(
+		    num_ + rhs.num_,
+		    denom_
+		);
+	    }
+	    return rationalg(
+		num_ * rhs.denom_ + rhs.num_ * denom_,
+		denom_ * rhs.denom_
+	    );
+	}
+
+        rationalg<T> operator- (const rationalg<T>& rhs) const {
+	    if(has_same_denom(rhs)) {
+		return rationalg(
+		    num_ - rhs.num_,
+		    denom_
+		);
+	    }
+	    return rationalg(
+		num_ * rhs.denom_ - rhs.num_ * denom_,
+		denom_ * rhs.denom_
+	    );
+	}
+
+        rationalg<T> operator* (const rationalg<T>& rhs) const {
+	    return rationalg(
+		num_ * rhs.num_,
+		denom_ * rhs.denom_
+	    );
+	}
+
+        rationalg<T> operator/ (const rationalg<T>& rhs) const {
+	    return rationalg(
+		num_ * rhs.denom_,
+		denom_ * rhs.num_
+	    );
+	}
+
+	
+        rationalg<T> operator+ (double rhs) const {
+	    return rationalg(
+		num_ + T(rhs) * denom_,
+		denom_
+	    );
+	}
+
+        rationalg<T> operator- (double rhs) const {
+	    return rationalg(
+		num_ - T(rhs) * denom_,
+		denom_
+	    );
+	}
+
+        rationalg<T> operator* (double rhs) const {
+	    return rationalg(
+		num_ * T(rhs),
+		denom_
+	    );
+	}
+
+        rationalg<T> operator/ (double rhs) const {
+	    return rationalg(
+		num_,
+		denom_* T(rhs)
+	    );
+	}
+	
+        
+
+        rationalg<T> operator- () const {
+	    return rationalg(
+		-num_, 
+		denom_
+	    );
+	}
+
+        
+
+        Sign sign() const {
+            geo_debug_assert(denom_.sign() != ZERO);
+            return Sign(num_.sign() * denom_.sign());
+        }
+        
+        
+
+        Sign compare(const rationalg<T>& rhs) const {
+            if(sign() != rhs.sign()){
+                return Sign(sign()-rhs.sign());
+            }
+            if(has_same_denom(rhs)) {
+                return Sign(num_.compare(rhs.num_) * denom_.sign());
+            }
+            return Sign(
+                (num_ * rhs.denom_).compare(rhs.num_ * denom_) *
+                denom_.sign() * rhs.denom_.sign()
+            );
+        }
+
+        Sign compare(double rhs) const {
+            return Sign(
+                num_.compare(T(rhs)*denom_) * denom_.sign()
+            );
+        }
+        
+        bool operator> (const rationalg<T>& rhs) const {
+            return (int(compare(rhs))>0);
+        }
+
+        bool operator>= (const rationalg<T>& rhs) const {
+            return (int(compare(rhs))>=0);            
+        }
+
+        bool operator< (const rationalg<T>& rhs) const {
+            return (int(compare(rhs))<0);
+        }
+
+        bool operator<= (const rationalg<T>& rhs) const {
+            return (int(compare(rhs))<=0);
+        }
+
+        bool operator> (double rhs) const {
+            return (int(compare(rhs))>0);            
+        }
+
+        bool operator>= (double rhs) const {
+            return (int(compare(rhs))>=0);            
+        }
+
+        bool operator< (double rhs) const {
+            return (int(compare(rhs))<0);            
+        }
+
+        bool operator<= (double rhs) const {
+            return (int(compare(rhs))<=0);                        
+        }
+
+        
+
+        double estimate() const {
+            return num_.estimate() / denom_.estimate();
+        }
+        
+      protected:
+	void copy(const rationalg<T>& rhs) {
+	    num_ = rhs.num_;
+	    denom_ = rhs.denom_;
+	}
+
+	bool has_same_denom(const rationalg<T>& rhs) const {
+            return denom_ == rhs.denom_;
+	}
+	
+      private:
+	T num_;
+	T denom_;
+    };
+
+    
+
+    template <class T>
+    inline rationalg<T> operator+ (double a, const rationalg<T>& b) {
+        return b + a;
+    }
+
+    template <class T>    
+    inline rationalg<T> operator- (double a, const rationalg<T>& b) {
+        rationalg<T> result = b - a;
+        result.num().negate();
+        return result;
+    }
+
+    template <class T>    
+    inline rationalg<T> operator* (double a, const rationalg<T>& b) {
+        return b * a;
+    }
+
+    template <class T>    
+    inline rationalg<T> operator/ (double a, const rationalg<T>& b) {
+        return rationalg<T>(
+	    T(a)*b.denom(),
+	    b.num()
+	);
+    }
+    
+    template <class T>    
+    inline bool operator== (const rationalg<T>& a, const rationalg<T>& b) {
+        return (a.compare(b) == ZERO);
+    }
+
+    template <class T>    
+    inline bool operator== (const rationalg<T>& a, double b) {
+        return (a.compare(b) == ZERO);
+    }
+
+    template <class T>    
+    inline bool operator== (double a, const rationalg<T>& b) {
+        return (b.compare(a) == ZERO);
+    }
+
+    template <class T>    
+    inline bool operator!= (const rationalg<T>& a, const rationalg<T>& b) {
+        return (a.compare(b) != ZERO);
+    }
+
+    template <class T>    
+    inline bool operator!= (const rationalg<T>& a, double b) {
+        return (a.compare(b) != ZERO);
+    }
+
+    template <class T>    
+    inline bool operator!= (double a, const rationalg<T>& b) {
+        return (b.compare(a) != ZERO);
+    }
+
+    
+
+    template <class T> inline Sign geo_sgn(const rationalg<T>& x) {
+        return x.sign();
+    }
+
+    template <class T> inline Sign geo_cmp(
+        const rationalg<T>& a, const rationalg<T>& b
+    ) {
+        return a.compare(b);
+    }
+    
+    namespace Numeric {
+
+        template <class T> inline void optimize_number_representation(
+            rationalg<T>& x
+        ) {
+            x.optimize();
+        }
+        
+    }
+
+    
+    
+}
+
+#endif
+
 
 /******* extracted from multi_precision.h *******/
 
@@ -1934,6 +1903,21 @@ namespace GEO {
                 (capa + 1) * sizeof(double);
         }
 
+        static size_t bytes_on_stack(index_t capa) {
+#ifndef GEO_HAS_BIG_STACK
+            // Note: standard predicates need at least 512, hence the min.
+            // index_t(MAX_CAPACITY_ON_STACK) is necessary, else with
+            // MAX_CAPACITY_ON_STACK alone the compiler tries to generate a
+            // reference to NOT_IN_LIST resulting in a link error.
+            // (weird, even with constexpr, I do not understand...)
+            // Probably when the function excepts a *reference*
+            geo_debug_assert(
+                capa <= std::max(index_t(MAX_CAPACITY_ON_STACK),index_t(512))
+            );
+#endif
+            return bytes(capa);
+        }
+        
         expansion(index_t capa) :
             length_(0),
             capacity_(capa) {
@@ -1946,7 +1930,7 @@ namespace GEO {
     expansion& new_expansion_on_stack(index_t capa);         
 #else
 #define new_expansion_on_stack(capa)                           \
-    (new (alloca(expansion::bytes(capa)))expansion(capa))
+    (new (alloca(expansion::bytes_on_stack(capa)))expansion(capa))
 #endif
 
         static expansion* new_expansion_on_heap(index_t capa);
@@ -1960,7 +1944,24 @@ namespace GEO {
 	    x_[0] = a;
 	    return *this;
 	}
-	
+
+	expansion& assign(const expansion& rhs) {
+            geo_debug_assert(capacity() >= rhs.length());
+	    set_length(rhs.length());
+            for(index_t i=0; i<rhs.length(); ++i) {
+                x_[i] = rhs.x_[i];
+            }
+	    return *this;
+	}
+
+        expansion& assign_abs(const expansion& rhs) {
+            assign(rhs);
+            if(sign() == NEGATIVE) {
+                negate();
+            }
+            return *this;
+        }
+        
         static index_t sum_capacity(double a, double b) {
             geo_argused(a);
             geo_argused(b);
@@ -2246,6 +2247,8 @@ namespace GEO {
         }
 
         void optimize();
+
+        static void show_all_stats();
         
     protected:
         static index_t sub_product_capacity(
@@ -2258,17 +2261,17 @@ namespace GEO {
             const double* a, index_t a_length, const expansion& b
         );
 
-#define expansion_sub_product(a, a_length, b)           \
-    new_expansion_on_stack(                       \
-        sub_product_capacity(a_length, b.length()) \
-    )->assign_sub_product(a, a_length, b)
+        expansion(const expansion& rhs) = delete;
+
+        expansion& operator= (const expansion& rhs) = delete;
 
     private:
-        expansion(const expansion& rhs);
 
-        expansion& operator= (const expansion& rhs);
-
-    private:
+#ifdef GEO_OS_APPLE
+        static constexpr index_t MAX_CAPACITY_ON_STACK = 256;
+#else    
+        static constexpr index_t MAX_CAPACITY_ON_STACK = 1024;
+#endif
         index_t length_;
         index_t capacity_;
         double x_[2];  // x_ is in fact of size [capacity_]
@@ -2281,6 +2284,9 @@ namespace GEO {
 #define expansion_create(a)	      \
     new_expansion_on_stack(1)->assign(a)
 
+
+#define expansion_abs(e)	      \
+    new_expansion_on_stack(e.length())->assign_abs(e)
     
 #define expansion_sum(a, b)            \
     new_expansion_on_stack(           \
@@ -2412,25 +2418,18 @@ namespace GEO {
 namespace GEO {
 
     class expansion_nt;
-    class rational_nt;
     
     class GEOGRAM_API expansion_nt {
     public:
-         enum UninitializedType {
-             UNINITIALIZED
-         };
 
          enum Operation {
              SUM, DIFF, PRODUCT
          };
          
-         explicit expansion_nt(
-             UninitializedType uninitialized
-         ) : rep_(nullptr) {
-             geo_argused(uninitialized);
+         expansion_nt() : rep_(nullptr) {
          }
          
-        explicit expansion_nt(double x = 0.0) {
+        explicit expansion_nt(double x) {
             rep_ = expansion::new_expansion_on_heap(1);
             rep()[0] = x;
             rep().set_length(1);
@@ -2438,10 +2437,7 @@ namespace GEO {
 
         explicit expansion_nt(const expansion& rhs) {
             rep_ = expansion::new_expansion_on_heap(rhs.length());
-            rep().set_length(rhs.length());
-            for(index_t i=0; i<rhs.length(); ++i) {
-                rep()[i] = rhs[i];
-            }
+            rep().assign(rhs);
         }
 
         explicit expansion_nt(
@@ -2508,6 +2504,7 @@ namespace GEO {
                 geo_assert_not_reached;
                 break;
             case PRODUCT:
+                // HERE: TODO CHECK SIZE
                 const expansion& p1 = expansion_product(x,y);
                 const expansion& p2 = expansion_product(z,t);
                 rep_ = expansion::new_expansion_on_heap(
@@ -2572,6 +2569,10 @@ namespace GEO {
 
         void optimize() {
             rep().optimize();
+        }
+
+        void negate() {
+            rep().negate();
         }
         
         
@@ -2718,7 +2719,7 @@ namespace GEO {
             const double* a, const double* b, const double* c,
             coord_index_t dim
         );
-        friend class rational_nt;
+        // friend class rational_nt;
     };
 
     inline expansion_nt operator+ (double a, const expansion_nt& b) {
@@ -2785,6 +2786,12 @@ namespace GEO {
         return x.sign();
     }
 
+    template <> inline Sign geo_cmp(
+        const expansion_nt& x, const expansion_nt& y
+    ) {
+        return x.compare(y);
+    }
+    
     
 
     inline bool expansion_nt_is_zero(const expansion_nt& x) {
@@ -2836,8 +2843,10 @@ namespace GEO {
         const expansion_nt& a32,const expansion_nt& a33 
     );
 
-
-#ifndef GEOGRAM_PSM   
+// Make things a bit faster if target OS has large stack size
+#ifdef GEO_HAS_BIG_STACK
+    
+    
     template <> inline expansion_nt det2x2(
         const expansion_nt& a11, const expansion_nt& a12,                    
         const expansion_nt& a21, const expansion_nt& a22
@@ -2884,6 +2893,8 @@ namespace GEO {
     }
     
 #endif
+    
+    
 }
 
 inline std::ostream& operator<< (
@@ -2905,337 +2916,23 @@ inline std::istream& operator>> ( std::istream& is, GEO::expansion_nt& a) {
 
 namespace GEO {
 
-    class GEOGRAM_API rational_nt {
-      public:
-
-         enum UninitializedType {
-             UNINITIALIZED
-         };
-
-         explicit rational_nt(UninitializedType uninitialized) :
-            num_(expansion_nt::UNINITIALIZED),
-            denom_(expansion_nt::UNINITIALIZED) {
-             geo_argused(uninitialized);
-         }
-
-         
-        explicit rational_nt(double x = 0.0) : num_(x), denom_(1.0) {
-        }
-
-        explicit rational_nt(const expansion_nt& x) : num_(x), denom_(1.0) {
-        }
-
-        explicit rational_nt(expansion_nt&& x) : num_(x), denom_(1.0) {
-        }
-        
-        explicit rational_nt(double num, double denom)
-	    : num_(num), denom_(denom) {
-        }
-        
-        explicit rational_nt(const expansion_nt& num, const expansion_nt& denom)
-	    : num_(num), denom_(denom) {
-        }
-
-        explicit rational_nt(
-            expansion_nt&& num, expansion_nt&& denom
-        ) : num_(num), denom_(denom) {
-        }
-            
-        rational_nt(const rational_nt& rhs) {
-            copy(rhs);
-        }
-
-        rational_nt(rational_nt&& rhs) :
-           num_(rhs.num_),
-           denom_(rhs.denom_) {
-        }
-        
-        rational_nt& operator= (const rational_nt& rhs) {
-            num_ = rhs.num_;
-            denom_ = rhs.denom_;
-            return *this;
-        }
-
-        rational_nt& operator= (rational_nt&& rhs) {
-            num_ = rhs.num_;
-            denom_ = rhs.denom_;
-            return *this;
-        }
-        
-	const expansion_nt& num() const {
-	    return num_;
-	}
-
-	const expansion_nt& denom() const {
-	    return denom_;
-	}
-
-	 expansion_nt& num() {
-	    return num_;
-	}
-
-	 expansion_nt& denom() {
-	    return denom_;
-	}
-
-        void optimize() {
-            num().optimize();
-            denom().optimize();
-        }
-         
-        
-
-        rational_nt& operator+= (const rational_nt& rhs) {
-	    if(has_same_denom(rhs)) {
-		num_ += rhs.num_;
-	    } else {
-		num_ = num_ * rhs.denom_ + rhs.num_ * denom_;	    
-		denom_ *= rhs.denom_;
-	    }
-	    return *this;
-	}
-
-        rational_nt& operator-= (const rational_nt& rhs) {
-	    if(has_same_denom(rhs)) {
-		num_ -= rhs.num_;
-	    } else {
-		num_ = num_ * rhs.denom_ - rhs.num_ * denom_;	    
-		denom_ *= rhs.denom_;
-	    }
-	    return *this;
-	}
-
-        rational_nt& operator*= (const rational_nt& rhs) {
-	    num_ *= rhs.num_;
-	    denom_ *= rhs.denom_;
-	    return *this;
-	}
-
-        rational_nt& operator/= (const rational_nt& rhs) {
-	    num_ *= rhs.denom_;
-	    denom_ *= rhs.num_;
-	    return *this;
-	}
-	
-        rational_nt& operator+= (double rhs) {
-	    num_ += denom_ * rhs;
-	    return *this;
-	}
-
-        rational_nt& operator-= (double rhs) {
-	    num_ -= denom_ * rhs;
-	    return *this;
-	}
-
-        rational_nt& operator*= (double rhs) {
-	    num_ *= rhs;
-	    return *this;
-	}
-
-        rational_nt& operator/= (double rhs) {
-	    denom_ *= rhs;
-	    return *this;
-	}
-	
-        
-
-        rational_nt operator+ (const rational_nt& rhs) const {
-	    if(has_same_denom(rhs)) {
-		return rational_nt(
-		    num_ + rhs.num_,
-		    denom_
-		);
-	    }
-	    return rational_nt(
-		num_ * rhs.denom_ + rhs.num_ * denom_,
-		denom_ * rhs.denom_
-	    );
-	}
-
-        rational_nt operator- (const rational_nt& rhs) const {
-	    if(has_same_denom(rhs)) {
-		return rational_nt(
-		    num_ - rhs.num_,
-		    denom_
-		);
-	    }
-	    return rational_nt(
-		num_ * rhs.denom_ - rhs.num_ * denom_,
-		denom_ * rhs.denom_
-	    );
-	}
-
-        rational_nt operator* (const rational_nt& rhs) const {
-	    return rational_nt(
-		num_ * rhs.num_,
-		denom_ * rhs.denom_
-	    );
-	}
-
-        rational_nt operator/ (const rational_nt& rhs) const {
-	    return rational_nt(
-		num_ * rhs.denom_,
-		denom_ * rhs.num_
-	    );
-	}
-
-	
-        rational_nt operator+ (double rhs) const {
-	    return rational_nt(
-		num_ + rhs * denom_,
-		denom_
-	    );
-	}
-
-        rational_nt operator- (double rhs) const {
-	    return rational_nt(
-		num_ - rhs * denom_,
-		denom_
-	    );
-	}
-
-        rational_nt operator* (double rhs) const {
-	    return rational_nt(
-		num_ *rhs,
-		denom_
-	    );
-	}
-
-        rational_nt operator/ (double rhs) const {
-	    return rational_nt(
-		num_,
-		denom_*rhs
-	    );
-	}
-	
-        
-
-        rational_nt operator- () const {
-	    return rational_nt(
-		-num_, 
-		denom_
-	    );
-	}
-
-        
-
-        Sign compare(const rational_nt& rhs) const;
-
-        Sign compare(double rhs) const;
-        
-        bool operator> (const rational_nt& rhs) const {
-            return (int(compare(rhs))>0);
-        }
-
-        bool operator>= (const rational_nt& rhs) const {
-            return (int(compare(rhs))>=0);            
-        }
-
-        bool operator< (const rational_nt& rhs) const {
-            return (int(compare(rhs))<0);
-        }
-
-        bool operator<= (const rational_nt& rhs) const {
-            return (int(compare(rhs))<=0);
-        }
-
-        bool operator> (double rhs) const {
-            return (int(compare(rhs))>0);            
-        }
-
-        bool operator>= (double rhs) const {
-            return (int(compare(rhs))>=0);            
-        }
-
-        bool operator< (double rhs) const {
-            return (int(compare(rhs))<0);            
-        }
-
-        bool operator<= (double rhs) const {
-            return (int(compare(rhs))<=0);                        
-        }
-
-        
-
-        double estimate() const {
-            return num_.estimate() / denom_.estimate();
-        }
-        
-        Sign sign() const {
-            geo_debug_assert(denom_.sign() != ZERO);
-            return Sign(num_.sign() * denom_.sign());
-        }
-
-      protected:
-	void copy(const rational_nt& rhs) {
-	    num_ = rhs.num_;
-	    denom_ = rhs.denom_;
-	}
-
-	bool has_same_denom(const rational_nt& rhs) const {
-            return denom_ == rhs.denom_;
-	}
-	
-      private:
-	expansion_nt num_;
-	expansion_nt denom_;
-    };
-
     
 
-    inline rational_nt operator+ (double a, const rational_nt& b) {
-        return b + a;
-    }
+    namespace Numeric {
+        
+        template<> inline void optimize_number_representation(expansion_nt& x) {
+            x.optimize();
+        }
 
-    inline rational_nt operator- (double a, const rational_nt& b) {
-        rational_nt result = b - a;
-        result.num().rep().negate();
-        return result;
-    }
-
-    inline rational_nt operator* (double a, const rational_nt& b) {
-        return b * a;
-    }
-
-    inline rational_nt operator/ (double a, const rational_nt& b) {
-        return rational_nt(
-	    a*b.denom(),
-	    b.num()
-	);
+        template<> Sign GEOGRAM_API ratio_compare(
+            const expansion_nt& a_num, const expansion_nt& a_denom,
+            const expansion_nt& b_num, const expansion_nt& b_denom
+        );
     }
     
-    inline bool operator== (const rational_nt& a, const rational_nt& b) {
-        return (a.compare(b) == ZERO);
-    }
-
-    inline bool operator== (const rational_nt& a, double b) {
-        return (a.compare(b) == ZERO);
-    }
-
-    inline bool operator== (double a, const rational_nt& b) {
-        return (b.compare(a) == ZERO);
-    }
-
-    inline bool operator!= (const rational_nt& a, const rational_nt& b) {
-        return (a.compare(b) != ZERO);
-    }
-
-    inline bool operator!= (const rational_nt& a, double b) {
-        return (a.compare(b) != ZERO);
-    }
-
-    inline bool operator!= (double a, const rational_nt& b) {
-        return (b.compare(a) != ZERO);
-    }
-
     
-    
-    template <> inline Sign geo_sgn(const rational_nt& x) {
-        return x.sign();
-    }
 
-    
-    
+    typedef rationalg<expansion_nt> rational_nt;
 }
 
 #endif

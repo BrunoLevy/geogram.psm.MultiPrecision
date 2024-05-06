@@ -68,23 +68,10 @@ namespace {
 
     using namespace GEO;
 
-    
-    
-    bool expansion_length_stat_ = false;
+#ifdef PCK_STATS    
     std::vector<index_t> expansion_length_histo_;
-
-    class ExpansionStatsDisplay {
-    public:
-        ~ExpansionStatsDisplay() {
-            for(index_t i = 0; i < expansion_length_histo_.size(); ++i) {
-                std::cerr << "expansion len " << i
-                    << " : " << expansion_length_histo_[i] << std::endl;
-            }
-        }
-    };
-
-    ExpansionStatsDisplay expansion_stats_display_;
-
+#endif
+    
     
 
     class Pools {
@@ -319,6 +306,49 @@ namespace {
         two_sum(_m, _k, x[7], x[6]);
 #endif
     }
+
+    // [Shewchuk 97]
+    // (https://people.eecs.berkeley.edu/~jrs/papers/robustr.pdf)
+    // Section 2.8: other operations
+    // Compression
+    // Note: when converting the algorithms in Shewchuk's article
+    // into code, indices in the article go from 1 to m, and in the
+    // code they go from 0 to m-1 !!!
+    // /!\ there is a bug in the original article,
+    // line 14 of the algorigthm should be h_top <= q (small q and not capital Q)
+
+    void compress_expansion(expansion& e) {
+        expansion& h = e;
+        
+        index_t m = e.length();
+        double Qnew,q;
+
+        index_t bottom = m-1;        
+        double Q = e[bottom];
+
+        for(int i=int(m)-2; i>=0; --i) {
+            fast_two_sum(Q, e[index_t(i)], Qnew, q);
+            Q = Qnew;
+            if(q != 0.0) {
+                h[bottom] = Q;
+                --bottom;
+                Q = q;
+            }
+        }
+        h[bottom] = Q;
+        
+        index_t top = 0;
+        for(index_t i=bottom+1; i<m; ++i) {
+            fast_two_sum(h[i],Q,Qnew,q);
+            Q = Qnew;
+            if(q != 0) {
+                h[top] = q;
+                ++top;
+            }
+        }
+        h[top] = Q;
+        h.set_length(top+1);
+    }    
 }
 
 namespace GEO {
@@ -551,6 +581,7 @@ namespace GEO {
         }
         h.set_length(hindex);
     }
+
 }
 
 
@@ -591,12 +622,12 @@ namespace GEO {
     
     expansion* expansion::new_expansion_on_heap(index_t capa) {
 	Process::acquire_spinlock(expansions_lock);
-        if(expansion_length_stat_) {
+#ifdef PCK_STATS
             if(capa >= expansion_length_histo_.size()) {
                 expansion_length_histo_.resize(capa + 1);
             }
             expansion_length_histo_[capa]++;
-        }
+#endif            
         Memory::pointer addr = Memory::pointer(
             pools_.malloc(expansion::bytes(capa))
         );
@@ -683,13 +714,42 @@ namespace GEO {
         } else {
             // "Distillation" (see Shewchuk's paper) is computed recursively,
             // by splitting the list of expansions to sum into two halves.
+            
             const double* a1 = a;
             index_t a1_length = a_length / 2;
             const double* a2 = a1 + a1_length;
             index_t a2_length = a_length - a1_length;
-            expansion& a1b = expansion_sub_product(a1, a1_length, b);
-            expansion& a2b = expansion_sub_product(a2, a2_length, b);
-            this->assign_sum(a1b, a2b);
+
+            // Allocate both halves on the stack or on the heap if too large
+            // (some platformes, e.g. MacOSX, have a small stack)
+            
+            index_t a1b_capa = sub_product_capacity(a1_length, b.length());
+            index_t a2b_capa = sub_product_capacity(a2_length, b.length());
+
+            bool a1b_on_heap = (a1b_capa > MAX_CAPACITY_ON_STACK);
+            bool a2b_on_heap = (a2b_capa > MAX_CAPACITY_ON_STACK);
+
+            expansion* a1b = a1b_on_heap ?
+                new_expansion_on_heap(a1b_capa) :
+                new_expansion_on_stack(a1b_capa);
+
+            a1b->assign_sub_product(a1, a1_length, b);
+            
+            expansion* a2b = a2b_on_heap ?
+                new_expansion_on_heap(a2b_capa) :
+                new_expansion_on_stack(a2b_capa);
+
+            a2b->assign_sub_product(a2, a2_length, b);
+            
+            this->assign_sum(*a1b, *a2b);
+
+            if(a1b_on_heap) {
+                delete_expansion_on_heap(a1b);
+            }
+
+            if(a2b_on_heap) {
+                delete_expansion_on_heap(a2b);
+            }
         }
         return *this;
     }
@@ -712,25 +772,85 @@ namespace GEO {
             two_two_product(a.data(), b.data(), x_);
             set_length(8);
         } else {
-            // Recursive distillation: the shortest expansion
-            // is split into two parts.
-            if(a.length() < b.length()) {
-                const double* a1 = a.data();
-                index_t a1_length = a.length() / 2;
-                const double* a2 = a1 + a1_length;
-                index_t a2_length = a.length() - a1_length;
-                expansion& a1b = expansion_sub_product(a1, a1_length, b);
-                expansion& a2b = expansion_sub_product(a2, a2_length, b);
-                this->assign_sum(a1b, a2b);
-            } else {
-                const double* b1 = b.data();
-                index_t b1_length = b.length() / 2;
-                const double* b2 = b1 + b1_length;
-                index_t b2_length = b.length() - b1_length;
-                expansion& ab1 = expansion_sub_product(b1, b1_length, a);
-                expansion& ab2 = expansion_sub_product(b2, b2_length, a);
-                this->assign_sum(ab1, ab2);
+            
+            
+            const expansion* pa = &a;
+            const expansion* pb = &b;
+
+            if(pa->length() > pb->length()) {
+                std::swap(pa, pb);
             }
+
+            // [Shewchuk 97]
+            // (https://people.eecs.berkeley.edu/~jrs/papers/robustr.pdf)
+            // Section 2.8: other operations
+            // Distillation: sum of k values.
+            //    Worst case: 1/2*k*(k-1)
+            //    But O(k log(k)) if the "summing tree" is well balanced
+            //      and using fast_expansion_sum().
+            // Recommended way of computing a product:
+            //    compute a1*b, a2*b ... ak*b using scale_expansion_zeroelim()
+            //    sum them using a well-balanced tree
+            // However, there is an extra cost for the recursion (and more
+            // importantly, for allocating the intermediary sums, especially
+            // when they do not fit on the stack). So when there are less than
+            // 16 values to add, we simply accumulate them.
+
+            bool use_balanced_distillation = (pa->length() >= 16);
+
+            if(use_balanced_distillation) {
+                // assign_sub_product() is a recursive function that
+                // creates a balanced distillation tree on the stack.
+                assign_sub_product(pa->data(), pa->length(),*pb);
+            } else {
+                // trivial implementation: compute all the products
+                // P = ak*b and accumulate them into S
+
+                index_t P_capa = product_capacity(*pb, 3.0); // 3.0, or any
+                                                             // number that is
+                                                             // not a power of 2
+                
+                index_t S_capa = capacity(); // same capacity as this,
+                                             // enough to store sum.
+            
+                bool P_on_heap = (P_capa > MAX_CAPACITY_ON_STACK);
+                bool S_on_heap = (S_capa > MAX_CAPACITY_ON_STACK);
+            
+                expansion* P = P_on_heap ?
+                    new_expansion_on_heap(P_capa) :
+                    new_expansion_on_stack(P_capa);
+
+                expansion* S = S_on_heap ?
+                    new_expansion_on_heap(S_capa) :
+                    new_expansion_on_stack(S_capa);
+
+                expansion* S1 = S;
+                expansion* S2 = this;
+                
+                if((pa->length()%2) == 0) { 
+                    std::swap(S1,S2);
+                }
+
+                for(index_t i=0; i<pa->length(); ++i) {
+                    if(i == 0) {
+                        S2->assign_product(*pb, (*pa)[i]);
+                    } else {
+                        P->assign_product(*pb, (*pa)[i]);
+                        S2->assign_sum(*S1,*P);
+                    }
+                    std::swap(S1,S2);
+                }
+                
+                geo_assert(S1 == this);
+
+                if(S_on_heap) {
+                    delete_expansion_on_heap(S);
+                }
+
+                if(P_on_heap) {
+                    delete_expansion_on_heap(P);
+                }
+            } 
         }
         return *this;
     }
@@ -879,24 +999,79 @@ namespace GEO {
     }
 
     Sign expansion::compare(const expansion& rhs) const {
+        // Fast path: different signs or both zero
+        Sign s1 = sign();
+        Sign s2 = rhs.sign();
+        if(s1 == ZERO && s2 == ZERO) {
+            return ZERO;
+        }
+        if(s1 != s2) {
+            return (int(s1) > int(s2) ? POSITIVE : NEGATIVE);
+        }
+
+        // Fast path: same internal representation
         if(is_same_as(rhs)) {
             return ZERO;
+        }
+
+        // Compute difference and return sign of difference
+        index_t capa = diff_capacity(*this, rhs);
+        if(capa > MAX_CAPACITY_ON_STACK) {
+            expansion* d = new_expansion_on_heap(capa);
+            d->assign_diff(*this, rhs);
+            Sign result = d->sign();
+            delete_expansion_on_heap(d);
+            return result;
         }
         const expansion& d = expansion_diff(*this, rhs);
         return d.sign();
     }
     
     Sign expansion::compare(double rhs) const {
-        if(rhs == 0.0) {
-            return sign();
+        // Fast path: different signs or both zero
+        Sign s1 = sign();
+        Sign s2 = geo_sgn(rhs);
+        if(s1 == ZERO && s2 == ZERO) {
+            return ZERO;
         }
+        if(s1 != s2) {
+            return (int(s1) > int(s2) ? POSITIVE : NEGATIVE);
+        }
+
+        // Fast path: same internal representation
         if(is_same_as(rhs)) {
             return ZERO;
+        }
+
+        // Compute difference and return sign of difference
+        index_t capa = diff_capacity(*this, rhs);
+        if(capa > MAX_CAPACITY_ON_STACK) {
+            expansion* d = new_expansion_on_heap(capa);
+            d->assign_diff(*this, rhs);
+            Sign result = d->sign();
+            delete_expansion_on_heap(d);
+            return result;
         }
         const expansion& d = expansion_diff(*this, rhs);
         return d.sign();
     }
     
+
+
+
+    void expansion::show_all_stats() {
+#ifdef PCK_STATS        
+        Logger::out("expansion") << "Stats" << std::endl;
+        for(index_t i = 0; i < expansion_length_histo_.size(); ++i) {
+            if(expansion_length_histo_[i] != 0) {
+                Logger::out("expansion")
+                    << "len " << i
+                    << " : " << expansion_length_histo_[i] << std::endl;
+            }
+        }
+#endif        
+    }
+
     
     
     Sign sign_of_expansion_determinant(
@@ -992,7 +1167,7 @@ namespace GEO {
     
 
     void expansion::optimize() {
-        grow_expansion_zeroelim(*this, 0.0, *this);
+        compress_expansion(*this); 
     }
 
     
@@ -1224,33 +1399,41 @@ namespace GEO {
     }
     
     
-    
-    Sign rational_nt::compare(const rational_nt& rhs) const {
-	if(has_same_denom(rhs)) {
-	    const expansion& diff_num = expansion_diff(
-		num_.rep(), rhs.num_.rep()
-	    );
-	    return Sign(diff_num.sign() * denom_.sign());
-	}
-	const expansion& num_a = expansion_product(
-	    num_.rep(), rhs.denom_.rep()
-	);
-	const expansion& num_b = expansion_product(
-	    rhs.num_.rep(), denom_.rep()
-	);
-	const expansion& diff_num = expansion_diff(num_a, num_b);
-	return Sign(
-	    diff_num.sign() * denom_.sign() * rhs.denom_.sign()
-	);
+
+    namespace Numeric {
+        
+        template<> Sign ratio_compare(
+            const expansion_nt& a_num, const expansion_nt& a_denom,
+            const expansion_nt& b_num, const expansion_nt& b_denom
+        ) {
+            // TODO HERE: CHECK THAT THIS FITS ON STACK
+            
+            Sign s1 = Sign(a_num.sign()*a_denom.sign());
+            Sign s2 = Sign(b_num.sign()*b_denom.sign());
+            if(s1 == ZERO && s2 == ZERO) {
+                return ZERO;
+            }
+            if(s1 != s2) {
+                return (int(s1) > int(s2) ? POSITIVE : NEGATIVE);
+            }
+            if(a_denom == b_denom) {
+                const expansion& diff_num = expansion_diff(
+                    a_num.rep(), b_num.rep()
+                );
+                return Sign(diff_num.sign() * a_denom.sign());
+            }
+            const expansion& num_a = expansion_product(
+                a_num.rep(), b_denom.rep()
+            );
+            const expansion& num_b = expansion_product(
+                b_num.rep(), a_denom.rep()
+            );
+            const expansion& diff_num = expansion_diff(num_a, num_b);
+            return Sign(
+                diff_num.sign() * a_denom.sign() * b_denom.sign()
+            );
+        }
+        
     }
 
-    Sign rational_nt::compare(double rhs) const {
-	const expansion& num_b = expansion_product(
-	    denom_.rep(), rhs
-	);
-	const expansion& diff_num = expansion_diff(num_.rep(), num_b);
-	return Sign(diff_num.sign() * denom_.sign());
-    }
-    
-    
 }
