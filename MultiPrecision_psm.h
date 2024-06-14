@@ -261,6 +261,7 @@ namespace GEO {
 #define GEO_OS_EMSCRIPTEN
 #define GEO_ARCH_64
 #define GEO_COMPILER_EMSCRIPTEN
+#define GEO_COMPILER_CLANG
 
 // =============================== Unsupported =============================
 #else
@@ -1002,12 +1003,12 @@ namespace GEO {
         }
 
         T& operator[] (unsigned int i) {
-            geo_debug_assert(i >= 0 && index_t(i) < size());
+            geo_debug_assert(index_t(i) < size());
             return baseclass::operator[] (index_t(i));
         }
 
         const T& operator[] (unsigned int i) const {
-            geo_debug_assert(i >= 0 && index_t(i) < size());
+            geo_debug_assert(index_t(i) < size());
             return baseclass::operator[] (index_t(i));
         }
 #endif	
