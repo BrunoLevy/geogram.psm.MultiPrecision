@@ -271,6 +271,8 @@ namespace GEO {
 
 #elif defined(__EMSCRIPTEN__)
 
+#include <emscripten.h>
+
 #define GEO_OS_UNIX
 #define GEO_OS_LINUX
 #define GEO_OS_EMSCRIPTEN
@@ -336,6 +338,12 @@ namespace GEO {
 #define GEO_NOEXCEPT throw()
 #endif
 
+#if defined(GOMGEN)
+#define GEO_NODISCARD
+#else
+#define GEO_NODISCARD [[nodiscard]]
+#endif
+
 #define FOR(I,UPPERBND) for(index_t I = 0; I<index_t(UPPERBND); ++I)
 
 // Silence warnings for alloca()
@@ -344,6 +352,38 @@ namespace GEO {
 #ifdef GEO_COMPILER_CLANG
 #pragma GCC diagnostic ignored "-Walloca"
 #endif
+
+// =============================== Parallel STL ============================
+
+// For now, deactivate parallel STL if in a Pluggable Softare Module
+// (because if compiling with gcc, this forces linking tbb which may
+//  be not suitable)
+
+#ifdef GEOGRAM_PSM
+#   define GEO_NO_PARALLEL_STL
+#endif
+
+// gcc versions older than gcc 10 are shipped with an old libTBB
+// that conflicts with modern libOneTBB, so we deactivate parallel
+// STL if gcc version is lower than 10.
+
+#ifndef GEO_NO_PARALLEL_STL
+#  if defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE < 10
+#    define GEO_NO_PARALLEL_STL
+#  endif
+#endif
+
+// The test should be:
+// defined(__cpp_lib_execution) && defined(__cpp_lib_parallel_algorithm)
+// but it does not seem to be implemented by all compilers, so using
+// hardcoded compiler test instead.
+
+#if !defined(GEO_COMPILER_CLANG) &&		\
+    !defined(GEO_OS_EMSCRIPTEN) && \
+    !defined(GEO_NO_PARALLEL_STL)
+#define GEO_PARALLEL_STL
+#endif
+
 
 #endif
 
@@ -374,6 +414,9 @@ namespace GEO {
 #include <algorithm> // for std::min / std::max
 #include <stdint.h>
 #include <limits>
+#include <type_traits>
+#include <iostream>
+#include <cstdlib>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -391,16 +434,16 @@ namespace GEO {
         POSITIVE = 1
     };
 
-    template <class T>
-    inline Sign geo_sgn(const T& x) {
-        return (x > 0) ? POSITIVE : (
-            (x < 0) ? NEGATIVE : ZERO
-        );
-    }
 
     template <class T>
     inline Sign geo_cmp(const T& a, const T& b) {
-        return Sign((a > b) * POSITIVE + (a < b) * NEGATIVE);
+        return Sign((a > b) - (a < b));
+    }
+
+
+    template <class T>
+    inline Sign geo_sgn(const T& x) {
+        return geo_cmp(x, T(0));
     }
 
     namespace Numeric {
@@ -438,22 +481,22 @@ namespace GEO {
         
         typedef double float64;
 
-        inline float32 max_float32() {
+        inline constexpr float32 max_float32() {
             return std::numeric_limits<float32>::max();
         }
 
-        inline float32 min_float32() {
+        inline constexpr float32 min_float32() {
             // Note: numeric_limits<>::min() is not
             // what we want (it returns the smallest
             // positive non-denormal).
             return -max_float32();
         }
 
-        inline float64 max_float64() {
+        inline constexpr float64 max_float64() {
             return std::numeric_limits<float64>::max();
         }
 
-        inline float64 min_float64() {
+        inline constexpr float64 min_float64() {
             // Note: numeric_limits<>::min() is not
             // what we want (it returns the smallest
             // positive non-denormal).
@@ -465,6 +508,8 @@ namespace GEO {
         bool GEOGRAM_API is_nan(float64 x);
 
         void GEOGRAM_API random_reset();
+
+        void GEOGRAM_API random_reset(int seed);
 
         int32 GEOGRAM_API random_int32();
 
@@ -525,13 +570,13 @@ namespace GEO {
 
     typedef geo_index_t index_t;
 
-    inline index_t max_index_t() {
+    inline constexpr index_t max_index_t() {
         return std::numeric_limits<index_t>::max();
     }
 
     typedef geo_signed_index_t signed_index_t;
 
-    inline signed_index_t max_signed_index_t() {
+    inline constexpr signed_index_t max_signed_index_t() {
         return std::numeric_limits<signed_index_t>::max();
     }
 
@@ -550,7 +595,55 @@ namespace GEO {
     static constexpr index_t NO_INDEX = index_t(-1);
 
     
+
+    template <class T> struct is_scalar {
+	typedef typename std::is_arithmetic<T>::type type;
+	static constexpr bool value = std::is_arithmetic<T>::value;
+    };
+
+    
 }
+
+
+
+
+
+#if defined(GOMGEN)
+#  define GEO_FP_CONTRACT_OFF(x)
+#elif defined(__clang__)
+#  define GEO_FP_CONTRACT_OFF _Pragma("clang fp contract(off)")
+#elif defined(_MSC_VER)
+#  define GEO_FP_CONTRACT_OFF _Pragma("fp_contract(off)")
+#elif defined(__GNUC__)
+
+// GCC does not have any pragma to deactivate FMA generation,
+// so instead we check that they are deactivated (by the command-line
+// option -ffp-contract=off) and fire an assertion fail if it was not
+// the case.
+struct GeoAssertNoFpContract {
+    GeoAssertNoFpContract() {
+#ifdef GEOGRAM_PSM
+	if(fp_contraction_enabled()) {
+	    std::cerr << "Needs to be compiled with -ffp-contract-off"
+		      << std::endl;
+	    abort();
+	}
+#else
+	geo_assert(!fp_contraction_enabled());
+#endif
+    }
+    static bool fp_contraction_enabled() {
+	return (a2plusb(0x1.0000002p0, -0x1.0000004p0) != 0.0);
+    }
+    __attribute__((noipa)) static double a2plusb(double a, double b) {
+	return a * a + b;
+    }
+};
+#  define GEO_FP_CONTRACT_OFF \
+    static GeoAssertNoFpContract CPP_CONCAT(assert_no_fp_contract_,__LINE__);
+#else
+#  define GEO_FP_CONTRACT_OFF _Pragma("STDC FP_CONTRACT OFF")
+#endif
 
 #endif
 
@@ -638,6 +731,7 @@ namespace GEO {
 #define GEOGRAM_BASIC_MEMORY
 
 #include <vector>
+#include <new>
 #include <string.h>
 #include <stdlib.h>
 
@@ -690,6 +784,9 @@ namespace GEO {
         typedef byte* pointer;
 
         
+        typedef const byte* const_pointer;
+
+        
         typedef void (*function_pointer)();
 
         inline void clear(void* addr, size_t size) {
@@ -700,9 +797,8 @@ namespace GEO {
             ::memcpy(to, from, size);
         }
 
-        inline pointer function_pointer_to_generic_pointer(
-            function_pointer fptr
-        ) {
+	template <class FPTR=function_pointer>
+	inline pointer function_pointer_to_generic_pointer(FPTR fptr) {
             // I know this is ugly, but I did not find a simpler warning-free
             // way that is portable between all compilers.
             pointer result = nullptr;
@@ -710,23 +806,49 @@ namespace GEO {
             return result;
         }
 
-        inline function_pointer generic_pointer_to_function_pointer(
-            pointer ptr
-        ) {
+        template <class FPTR = function_pointer>
+	inline FPTR generic_pointer_to_function_pointer(pointer ptr) {
             // I know this is ugly, but I did not find a simpler warning-free
             // way that is portable between all compilers.
-            function_pointer result = nullptr;
+            FPTR result = nullptr;
             ::memcpy(&result, &ptr, sizeof(pointer));
             return result;
         }
 
-        inline function_pointer generic_pointer_to_function_pointer(void* ptr) {
+        template <class FPTR = function_pointer>
+        inline FPTR generic_pointer_to_function_pointer(void* ptr) {
             // I know this is ugly, but I did not find a simpler warning-free
             // way that is portable between all compilers.
-            function_pointer result = nullptr;
+            FPTR result = nullptr;
             ::memcpy(&result, &ptr, sizeof(pointer));
             return result;
         }
+
+
+	template <class T> inline T& pointer_as_reference(void* ptr) {
+	    // This is the recommended way of converting between pointers
+	    // of different types. Casting the pointer directly is undefined
+	    // behavior. Note: the call to memcpy() is eliminated by the
+	    // compiler (that generates the same thing as when casting the
+	    // pointer).
+	    T* T_ptr;
+	    ::memcpy(&T_ptr, &ptr, sizeof(pointer));
+	    return *T_ptr;
+	}
+
+	template <class T> inline const T& pointer_as_reference(
+	    const void* ptr
+	) {
+	    // This is the recommended way of converting between pointers
+	    // of different types. Casting the pointer directly is undefined
+	    // behavior. Note: the call to memcpy() is eliminated by the
+	    // compiler (that generates the same thing as when casting the
+	    // pointer).
+	    const T* T_ptr;
+	    ::memcpy(&T_ptr, &ptr, sizeof(pointer));
+	    return *T_ptr;
+	}
+
 
 #define GEO_MEMORY_ALIGNMENT 64
 
@@ -895,8 +1017,17 @@ namespace GEO {
             template <class U>
             struct rebind {
                 
-                typedef aligned_allocator<U> other;
+                typedef aligned_allocator<U,ALIGN> other;
             };
+
+            /* \brief default constructor */
+            constexpr aligned_allocator() noexcept = default;
+
+            /* \brief conversion copy constructor */
+            template <class U, int A2> constexpr aligned_allocator(
+		const aligned_allocator<U, A2>&
+	    ) noexcept {
+	    }
 
             pointer address(reference x) {
                 return &x;
@@ -952,14 +1083,8 @@ namespace GEO {
             }
 
             void destroy(pointer p) {
+		geo_argused(p); // else MSVC complains
                 p->~value_type();
-#ifdef GEO_COMPILER_MSVC
-                (void) p; // to avoid a "unreferenced variable" warning
-#endif
-            }
-
-            template <class T2, int A2> operator aligned_allocator<T2, A2>() {
-                return aligned_allocator<T2,A2>();
             }
         };
 
@@ -1321,25 +1446,15 @@ namespace GEO {
                     size_ = size_in;
                     index_t nb_words = (size_ >> 5) + 1;
                     delete[] spinlocks_;
-                    spinlocks_ = new std::atomic<uint32_t>[nb_words];
-                    for(index_t i=0; i<nb_words; ++i) {
-                        // Note: std::atomic_init() is deprecated in C++20
-                        // that can initialize std::atomic through its
-                        // non-default constructor. We'll need to do something
-                        // else when we'll switch to C++20 (placement new...)
-                        std::atomic_init<uint32_t>(&spinlocks_[i],0u);
-                    }
+		    // Each entry is initialized with 0 -------------v
+                    spinlocks_ = new std::atomic<uint32_t>[nb_words]{};
                 }
-// Test at compile time that we are using atomic uint32_t operations (and not
-// using an additional lock which would be catastrophic in terms of performance)
-#ifdef __cpp_lib_atomic_is_always_lock_free
+
+                // Test at compile time that we are using atomic
+                // uint32_t operations (and not using an additional
+                // lock which would be catastrophic in terms of
+                // performance)
                 static_assert(std::atomic<uint32_t>::is_always_lock_free);
-#else
-// If we cannot test that at compile time, we test that at runtime in debug
-// mode (so that we will be notified in the non-regression test if one of
-// the platforms has the problem, which is very unlikely though...)
-                geo_debug_assert(size_ == 0 || spinlocks_[0].is_lock_free());
-#endif
             }
 
             index_t size() const {
@@ -1814,6 +1929,12 @@ namespace GEO {
 
     
 
+    
+    template <class T> struct is_scalar<rationalg<T> > {
+	typedef rationalg<T> type;
+	static constexpr bool value = true;
+    };
+
 }
 
 #endif
@@ -1850,6 +1971,18 @@ namespace GEO {
         double bround = bvirt - b;
         double around = a - avirt;
         y = around + bround;
+    }
+
+    inline void fast_two_sum(double a, double b, double& x, double& y) {
+        x = a + b;
+        double bvirt = x - a;
+        y = b - bvirt;
+    }
+
+    inline void fast_two_diff(double a, double b, double& x, double& y) {
+        x = a - b;
+        double bvirt = a - x;
+        y = bvirt - b;
     }
 
     inline void split(double a, double& ahi, double& alo) {
@@ -1988,9 +2121,14 @@ namespace GEO {
     (new (alloca(expansion::bytes_on_stack(capa)))expansion(capa))
 #endif
 
-    static expansion* new_expansion_on_heap(index_t capa);
+    static inline expansion* new_expansion_on_heap(index_t capa) {
+	void* addr = malloc(bytes(capa));
+	return new(addr)expansion(capa);
+    }
 
-    static void delete_expansion_on_heap(expansion* e);
+    static inline void delete_expansion_on_heap(expansion* e) {
+	free(e);
+    }
 
     // ========================== Initialization from doubles
 
@@ -2740,6 +2878,14 @@ namespace GEO {
             rep_->to_string()   ;
     }
 
+    bool is_one() const {
+	return rep().equals(1.0);
+    }
+
+    bool is_zero() const {
+	return sign() == ZERO;
+    }
+
     protected:
 
     void copy(const expansion_nt& rhs) {
@@ -2987,6 +3133,16 @@ namespace GEO {
     
 
     typedef rationalg<expansion_nt> rational_nt;
+
+    
+
+    
+    template <> struct is_scalar<expansion_nt> {
+	typedef expansion_nt type;
+	static constexpr bool value = true;
+    };
+
+    
 }
 
 #endif

@@ -59,122 +59,14 @@
 // This makes sure the compiler will not optimize y = a*x+b
 // with fused multiply-add, this would break the exact
 // predicates.
-#ifdef GEO_COMPILER_MSVC
-#pragma fp_contract(off)
-#endif
+GEO_FP_CONTRACT_OFF
 
 
 namespace {
 
     using namespace GEO;
 
-#ifdef PCK_STATS
-    std::vector<index_t> expansion_length_histo_;
-#endif
-
     
-
-    class Pools {
-
-    public:
-
-        Pools() : pools_(1024,nullptr) {
-            chunks_.reserve(1024);
-        }
-
-        ~Pools() {
-            for(index_t i=0; i<chunks_.size(); ++i) {
-                delete[] chunks_[i];
-            }
-        }
-
-        void* malloc(size_t size) {
-            if(size >= pools_.size()) {
-                return ::malloc(size);
-            }
-            if(pools_[size] == nullptr) {
-                new_chunk(size);
-            }
-            Memory::pointer result = pools_[size];
-            pools_[size] = next(pools_[size]);
-            return result;
-        }
-
-        void free(void* ptr, size_t size) {
-            if(size >= pools_.size()) {
-                ::free(ptr);
-                return;
-            }
-            set_next(Memory::pointer(ptr), pools_[size]);
-            pools_[size] = Memory::pointer(ptr);
-        }
-
-
-    protected:
-        static const index_t NB_ITEMS_PER_CHUNK = 512;
-
-        void new_chunk(size_t item_size) {
-            // Allocate chunk
-            Memory::pointer chunk =
-                new Memory::byte[item_size * NB_ITEMS_PER_CHUNK];
-            // Chain items in chunk
-            for(index_t i=0; i<NB_ITEMS_PER_CHUNK-1; ++i) {
-                Memory::pointer cur_item  = item(chunk, item_size, i);
-                Memory::pointer next_item = item(chunk, item_size, i+1);
-                set_next(cur_item, next_item);
-            }
-            // Last item's next is pool's first
-            set_next(
-                item(chunk, item_size,NB_ITEMS_PER_CHUNK-1),
-                pools_[item_size]
-            );
-            // Set pool's first to first in chunk
-            pools_[item_size] = chunk;
-            chunks_.push_back(chunk);
-        }
-
-    private:
-
-        Memory::pointer next(Memory::pointer item) const {
-            return *reinterpret_cast<Memory::pointer*>(item);
-        }
-
-        void set_next(
-            Memory::pointer item, Memory::pointer next
-        ) const {
-            *reinterpret_cast<Memory::pointer*>(item) = next;
-        }
-
-        Memory::pointer item(
-            Memory::pointer chunk, size_t item_size, index_t index
-        ) const {
-            geo_debug_assert(index < NB_ITEMS_PER_CHUNK);
-            return chunk + (item_size * size_t(index));
-        }
-
-        std::vector<Memory::pointer> pools_;
-
-        std::vector<Memory::pointer> chunks_;
-
-    };
-
-    static Pools pools_;
-
-    
-
-    inline void fast_two_sum(double a, double b, double& x, double& y) {
-        x = a + b;
-        double bvirt = x - a;
-        y = b - bvirt;
-    }
-
-#ifdef REMOVE_ME
-    inline void fast_two_diff(double a, double b, double& x, double& y) {
-        x = a - b;
-        double bvirt = a - x;
-        y = bvirt - b;
-    }
-#endif
 
     inline void two_one_sum(
         double a1, double a0, double b, double& x2, double& x1, double& x0
@@ -319,7 +211,7 @@ namespace {
     // into code, indices in the article go from 1 to m, and in the
     // code they go from 0 to m-1 !!!
     // /!\ there is a bug in the original article,
-    // line 14 of the algorigthm should be h_top <= q (small q and not capital Q)
+    // line 14 of the algorithm should be h_top <= q (small q and not capital Q)
 
     void compress_expansion(expansion& e) {
         expansion& h = e;
@@ -620,30 +512,6 @@ namespace GEO {
             check = 1.0 + expansion_epsilon_;
         } while((check != 1.0) && (check != lastcheck));
         expansion_splitter_ += 1.0;
-    }
-
-    static Process::spinlock expansions_lock = GEOGRAM_SPINLOCK_INIT;
-
-    expansion* expansion::new_expansion_on_heap(index_t capa) {
-        Process::acquire_spinlock(expansions_lock);
-#ifdef PCK_STATS
-        if(capa >= expansion_length_histo_.size()) {
-            expansion_length_histo_.resize(capa + 1);
-        }
-        expansion_length_histo_[capa]++;
-#endif
-        Memory::pointer addr = Memory::pointer(
-            pools_.malloc(expansion::bytes(capa))
-        );
-        Process::release_spinlock(expansions_lock);
-        expansion* result = new(addr)expansion(capa);
-        return result;
-    }
-
-    void expansion::delete_expansion_on_heap(expansion* e) {
-        Process::acquire_spinlock(expansions_lock);
-        pools_.free(e, expansion::bytes(e->capacity()));
-        Process::release_spinlock(expansions_lock);
     }
 
     // ====== Initialization from expansion and double ===============
@@ -1065,14 +933,9 @@ namespace GEO {
 
     void expansion::show_all_stats() {
 #ifdef PCK_STATS
-        Logger::out("expansion") << "Stats" << std::endl;
-        for(index_t i = 0; i < expansion_length_histo_.size(); ++i) {
-            if(expansion_length_histo_[i] != 0) {
-                Logger::out("expansion")
-                    << "len " << i
-                    << " : " << expansion_length_histo_[i] << std::endl;
-            }
-        }
+	// Place holder: if we compute statistics for expansions,
+	// the code here will be called if sys:stats is specified
+	// on command line.
 #endif
     }
 
